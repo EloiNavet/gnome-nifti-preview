@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  nifti-preview: shared-mime-info definitions for NIfTI images.
+
+  Installed per user into ~/.local/share/mime/packages/ by install.sh.
+  Glob-only on purpose: "*.nii.gz" is longer than the generic "*.gz" glob,
+  so the shared-mime-info "longest glob wins" rule routes only NIfTI files
+  here and every other .gz file keeps its usual type.
+-->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="image/x-nifti">
+    <comment>NIfTI medical image</comment>
+    <acronym>NIfTI</acronym>
+    <expanded-acronym>Neuroimaging Informatics Technology Initiative</expanded-acronym>
+    <alias type="image/x.nifti"/>
+    <generic-icon name="image-x-generic"/>
+    <glob pattern="*.nii"/>
+  </mime-type>
+  <mime-type type="image/x-compressed-nifti">
+    <comment>NIfTI medical image (gzip-compressed)</comment>
+    <acronym>NIfTI</acronym>
+    <expanded-acronym>Neuroimaging Informatics Technology Initiative</expanded-acronym>
+    <sub-class-of type="application/gzip"/>
+    <generic-icon name="image-x-generic"/>
+    <glob pattern="*.nii.gz"/>
+  </mime-type>
+</mime-info>

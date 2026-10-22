@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GNOME NIfTI Preview</title>
+<meta name="description" content="Press Space on a .nii or .nii.gz file in GNOME Files and see its slices instantly.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23111'/%3E%3Crect x='6' y='6' width='9' height='9' rx='2' fill='%23fff'/%3E%3Crect x='17' y='6' width='9' height='9' rx='2' fill='%23fff' opacity='.7'/%3E%3Crect x='6' y='17' width='9' height='9' rx='2' fill='%23fff' opacity='.7'/%3E%3Crect x='17' y='17' width='9' height='9' rx='2' fill='%233584e4'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #fafafa;
+    --fg: #1c1c1e;
+    --muted: #6b6b70;
+    --line: #e4e4e7;
+    --card: #ffffff;
+    --code: #f2f2f4;
+    --accent: #3584e4;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #141416;
+      --fg: #ececee;
+      --muted: #9a9aa0;
+      --line: #2a2a2e;
+      --card: #1c1c1f;
+      --code: #1f1f23;
+      --accent: #78aeed;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.6 "Cantarell", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 72px 20px 48px; }
+  header h1 { font-size: 2.4rem; line-height: 1.15; letter-spacing: -0.02em; margin: 0 0 12px; font-weight: 700; }
+  header p { font-size: 1.15rem; color: var(--muted); margin: 0; max-width: 34em; }
+  kbd {
+    font: 600 0.85em/1 ui-monospace, "SF Mono", "Cascadia Mono", monospace;
+    padding: 3px 7px; border: 1px solid var(--line); border-bottom-width: 2px;
+    border-radius: 6px; background: var(--card); color: var(--fg); white-space: nowrap;
+  }
+  .demo {
+    margin: 40px 0 8px; border-radius: 14px; overflow: hidden; background: #000;
+    border: 1px solid var(--line); box-shadow: 0 12px 40px rgba(0, 0, 0, 0.12);
+  }
+  .demo video { display: block; width: 100%; height: auto; }
+  .caption { font-size: 0.85rem; color: var(--muted); margin: 0 0 48px; }
+  h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 48px 0 14px; font-weight: 700; }
+  pre {
+    margin: 0; padding: 16px 18px; background: var(--code); border-radius: 10px;
+    overflow-x: auto; font: 0.92rem/1.7 ui-monospace, "SF Mono", "Cascadia Mono", monospace;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  pre .c { color: var(--muted); }
+  p.note { color: var(--muted); font-size: 0.92rem; margin: 12px 0 0; }
+  code { font-family: ui-monospace, "SF Mono", "Cascadia Mono", monospace; font-size: 0.92em; }
+  ul.keys { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 10px 20px; }
+  ul.keys li { display: contents; }
+  ul.keys kbd { justify-self: start; }
+  ul.keys span { color: var(--muted); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  footer {
+    margin-top: 64px; padding-top: 20px; border-top: 1px solid var(--line);
+    font-size: 0.85rem; color: var(--muted); display: flex; flex-wrap: wrap; gap: 8px 24px; justify-content: space-between;
+  }
+  @media (max-width: 520px) {
+    main { padding-top: 48px; }
+    header h1 { font-size: 1.9rem; }
+    ul.keys { grid-template-columns: 1fr; gap: 2px; }
+    ul.keys span { margin-bottom: 10px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>GNOME NIfTI Preview</h1>
+    <p>Select a <code>.nii</code> or <code>.nii.gz</code> in GNOME Files, press <kbd>Space</kbd>,
+       and see the three views, the metadata and the labels — instantly.</p>
+  </header>
+
+  <div class="demo">
+    <video controls muted loop playsinline preload="metadata" poster="assets/poster.webp"
+           aria-label="Pressing Space on a brain MRI in GNOME Files, then browsing its segmentations">
+      <source src="assets/demo.webm" type="video/webm">
+      <source src="assets/demo.mp4" type="video/mp4">
+    </video>
+  </div>
+  <p class="caption">Real recording of GNOME Files on Ubuntu 26.04.</p>
+
+  <h2>Install</h2>
+  <pre>wget -qO- https://raw.githubusercontent.com/EloiNavet/gnome-nifti-preview/main/get.sh | bash</pre>
+  <p class="note">Paste it in a terminal (<kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>T</kbd>). Nothing to compile;
+     everything stays in your home folder. To remove it:
+     <code>~/.local/share/gnome-nifti-preview/uninstall.sh</code></p>
+
+  <h2>Use</h2>
+  <ul class="keys">
+    <li><kbd>Space</kbd><span>Open or close the preview</span></li>
+    <li><kbd>Scroll</kbd><span>Move through the slices of a view</span></li>
+    <li><kbd>Hover</kbd><span>Value under the pointer — label and volume in cm³ on a segmentation</span></li>
+    <li><kbd>Click</kbd><span>Navigate — the other views follow</span></li>
+    <li><kbd>← →</kbd><span>Previous or next file</span></li>
+    <li><kbd>O</kbd><span>Neurological, radiological or stored orientation</span></li>
+    <li><kbd>L</kbd><span>Colours or grayscale for segmentations and RGB images; real part or magnitude of a spectrum</span></li>
+    <li><kbd>Z</kbd><span>Usual range or whole width of a spectrum</span></li>
+    <li><kbd>V</kbd><span>Choose the view that Page Up and Page Down scroll, without a mouse</span></li>
+  </ul>
+  <p class="note">NIfTI-1 and NIfTI-2, compressed or not, 3D to 5D, and NIfTI-MRS spectroscopy. Works with GNOME Sushi 46 to 51.</p>
+
+  <footer>
+    <span><a href="https://github.com/EloiNavet/gnome-nifti-preview">Source on GitHub</a> · GPL-2.0-or-later (images CC BY 4.0) · Not a medical device</span>
+    <span>On macOS or Windows? See <a href="https://github.com/marcoduering/MIQ">MIQ</a>.</span>
+  </footer>
+</main>
+</body>
+</html>

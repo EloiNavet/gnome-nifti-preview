@@ -1,0 +1,211 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only token for every job (third-party code runs in them: build
+# scripts, pip packages).
+permissions:
+  contents: read
+
+# A new commit supersedes the run of the previous one.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Rust backend (stable + MSRV 1.85)
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        toolchain: [stable, "1.85"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Install toolchain
+        run: |
+          rustup toolchain install ${{ matrix.toolchain }} --profile minimal --component clippy
+          rustup default ${{ matrix.toolchain }}
+      - name: Test (debug)
+        working-directory: backend
+        run: |
+          cargo test --locked
+          cargo test --locked --no-default-features
+      - name: Test (release, as shipped)
+        working-directory: backend
+        run: |
+          cargo test --release --locked
+          cargo test --release --locked --no-default-features
+      - name: Clippy
+        working-directory: backend
+        run: |
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo clippy --all-targets --locked --no-default-features -- -D warnings
+      - name: Sandbox applied on this kernel
+        working-directory: backend
+        run: echo '{"id":1,"op":"ping"}' | cargo run --release --locked -q -- serve | head -n1
+      - name: Build
+        working-directory: backend
+        run: cargo build --release --locked
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: matrix.toolchain == 'stable'
+        with:
+          name: nifti-preview-x86_64
+          path: backend/target/release/nifti-preview
+
+  supply-chain:
+    name: Dependencies (cargo deny) and shell scripts (shellcheck)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-deny
+      - name: Known vulnerabilities, licences, sources
+        working-directory: backend
+        run: cargo deny check
+      - name: shellcheck
+        run: git ls-files -z '*.sh' | xargs -0 shellcheck -x -S warning
+
+  fuzz:
+    name: Fuzz the file reader (2 minutes)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install nightly --profile minimal
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-fuzz
+      - run: python3 backend/fuzz/make_seeds.py /tmp/corpus
+      - name: Fuzz
+        working-directory: backend
+        run: |
+          # The prebuilt cargo-fuzz is a musl binary: name the target explicitly.
+          if ! cargo +nightly fuzz run --target x86_64-unknown-linux-gnu open_load_render /tmp/corpus -- -max_total_time=120 -rss_limit_mb=4096 -timeout=20 > /tmp/fuzz.log 2>&1; then
+            tail -n 80 /tmp/fuzz.log
+            # The end of the log as an annotation, readable without the raw logs.
+            echo "::error title=Fuzzing failed::$(tail -n 30 /tmp/fuzz.log | sed -e ':a' -e 'N' -e '$!ba' -e 's/%/%25/g; s/\r/%0D/g; s/\n/%0A/g')"
+            exit 1
+          fi
+          tail -n 3 /tmp/fuzz.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: failure()
+        with:
+          name: fuzz-crash
+          path: backend/fuzz/artifacts
+
+  reference:
+    name: Reference + differential tests (Python ${{ matrix.python }})
+    needs: backend
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        python: ["3.10", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ matrix.python }}
+          allow-prereleases: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: nifti-preview-x86_64
+          path: bin
+      - run: chmod +x bin/nifti-preview
+      - run: pip install -e "reference[test]"
+      - name: pytest (the Rust backend must match nibabel)
+        env:
+          NIFTI_PREVIEW_BIN: ${{ github.workspace }}/bin/nifti-preview
+        run: pytest -q reference
+
+  desktop-headless:
+    name: GJS client, Sushi registry, MIME, install
+    needs: backend
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: nifti-preview-x86_64
+          path: bin
+      - run: chmod +x bin/nifti-preview
+      - name: System packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends gnome-sushi gjs xvfb xauth shared-mime-info \
+            xdg-utils libglib2.0-bin desktop-file-utils python3-nibabel python3-numpy
+      - name: Fixtures
+        run: PYTHONPATH=reference/src python3 -m nifti_preview_ref.cli make-fixtures /tmp/fixtures
+      - name: GJS client and view state against the backend
+        run: NIFTI_PREVIEW_BACKEND=$PWD/bin/nifti-preview gjs tests/gjs/test_client.js /tmp/fixtures
+      - name: Routing inside the real Sushi 46 renderer registry
+        run: |
+          D="$(mktemp -d)"; mkdir -p "$D/sushi/viewers" "$D/gnome-nifti-preview/gjs"
+          cp sushi/legacy/niftiPreview.js "$D/sushi/viewers/"
+          cp -r sushi/common/niftiPreview "$D/gnome-nifti-preview/gjs/"
+          XDG_DATA_HOME="$D" xvfb-run -a gjs tests/gjs/sushi_mimehandler.js "$(dpkg-query -W -f='${Version}' gnome-sushi | cut -d- -f1)"
+      - name: MIME routing
+        run: tests/mime/test_mime.sh
+      - name: install.sh / uninstall.sh
+        run: tests/install/test_install.sh bin/nifti-preview
+      - name: One-command install (get.sh) from a local release
+        run: tests/install/test_get.sh bin/nifti-preview
+
+  sushi:
+    name: Real Sushi under Xvfb (${{ matrix.name }})
+    needs: backend
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.image }}
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu 24.04, Sushi 46
+            image: ubuntu:24.04
+            experimental: false
+          - name: Ubuntu 26.04, Sushi 50
+            image: ubuntu:26.04
+            experimental: false
+          - name: Ubuntu 26.10, Sushi 51 (experimental)
+            image: ubuntu:26.10
+            experimental: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: nifti-preview-x86_64
+          path: bin
+      - name: System packages
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update -q
+          apt-get install -y -q --no-install-recommends gnome-sushi gjs xvfb xdotool imagemagick x11-utils \
+            dbus dbus-x11 dbus-user-session shared-mime-info libglib2.0-bin adwaita-icon-theme fonts-cantarell \
+            procps python3 python3-nibabel python3-numpy
+          dpkg-query -W gnome-sushi gjs
+      - run: chmod +x bin/nifti-preview
+      - name: Fixtures
+        run: PYTHONPATH=reference/src python3 -m nifti_preview_ref.cli make-fixtures /tmp/fixtures
+      - name: End-to-end test
+        run: tests/integration/sushi_xvfb.sh /tmp/fixtures /tmp/screenshots bin/nifti-preview
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: screenshots-${{ strategy.job-index }}
+          path: /tmp/screenshots
