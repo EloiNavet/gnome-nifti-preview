@@ -1,0 +1,43 @@
+[package]
+name = "gnome-nifti-preview"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "GPL-2.0-or-later"
+description = "Fast medical image preview backend (NIfTI, MGH, MRtrix, NRRD, DICOM) for the GNOME NIfTI Preview Sushi plugin"
+authors = ["Eloi Navet"]
+repository = "https://github.com/EloiNavet/gnome-nifti-preview"
+publish = false
+
+[lib]
+name = "gnome_nifti_preview"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nifti-preview"
+path = "src/main.rs"
+
+[dependencies]
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+libdeflater = { version = "1.24", optional = true }
+openjpeg-sys = { version = "1.0.12", optional = true, default-features = false }
+memmap2 = "0.9"
+serde_json = "1"
+
+[features]
+default = ["libdeflate", "openjpeg"]
+# libdeflate (C, vendored) inflates whole gzip streams about 2x faster than zlib.
+# Build with --no-default-features for a pure-Rust binary.
+libdeflate = ["dep:libdeflater"]
+# OpenJPEG 2.5 (C, vendored): JPEG 2000 and HTJ2K in DICOM files. Without it
+# these transfer syntaxes are refused.
+openjpeg = ["dep:openjpeg-sys"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+# An arithmetic overflow becomes a panic, caught per request, instead of a
+# silently wrong index.
+overflow-checks = true
+panic = "unwind"

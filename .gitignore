@@ -1,0 +1,8 @@
+/backend/target/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+backend/fuzz-*.log
+
+# Local and downloaded medical-image samples never belong in Git.
+/tests/samples/

@@ -1,0 +1,23 @@
+# cargo deny check: known vulnerabilities, licences and origins of the
+# dependencies (run in CI).
+
+[graph]
+all-features = true
+
+[advisories]
+# Any RustSec advisory (vulnerability, unmaintained, unsound, yanked) fails.
+yanked = "deny"
+
+[licenses]
+# Compatible with GPL-2.0-or-later (distributed under GPL-3.0 if needed).
+allow = ["MIT", "Apache-2.0", "Zlib", "Unlicense", "BSD-2-Clause", "GPL-2.0-or-later"]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

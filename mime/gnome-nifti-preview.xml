@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  nifti-preview: shared-mime-info definitions for the medical images it
+  previews: NIfTI, FreeSurfer MGH/MGZ, MRtrix, NRRD and MetaImage.
+
+  Installed per user into ~/.local/share/mime/packages/ by install.sh.
+  Compressed types use globs longer than the generic "*.gz" glob, so the
+  shared-mime-info "longest glob wins" rule routes only these files here and
+  every other .gz file keeps its usual type. "*.mif" is also FrameMaker's
+  (application/x-mif): at equal weight the content decides, so both types
+  get their magic here ("mrtrix image", "<MIFFile"). DICOM
+  (application/dicom) is defined by shared-mime-info itself.
+-->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="image/x-nifti">
+    <comment>NIfTI medical image</comment>
+    <acronym>NIfTI</acronym>
+    <expanded-acronym>Neuroimaging Informatics Technology Initiative</expanded-acronym>
+    <alias type="image/x.nifti"/>
+    <generic-icon name="image-x-generic"/>
+    <glob pattern="*.nii"/>
+  </mime-type>
+  <mime-type type="image/x-compressed-nifti">
+    <comment>NIfTI medical image (gzip-compressed)</comment>
+    <acronym>NIfTI</acronym>
+    <expanded-acronym>Neuroimaging Informatics Technology Initiative</expanded-acronym>
+    <sub-class-of type="application/gzip"/>
+    <generic-icon name="image-x-generic"/>
+    <glob pattern="*.nii.gz"/>
+  </mime-type>
+  <mime-type type="image/x-mgh">
+    <comment>FreeSurfer MGH medical image</comment>
+    <acronym>MGH</acronym>
+    <expanded-acronym>Massachusetts General Hospital</expanded-acronym>
+    <generic-icon name="image-x-generic"/>
+    <glob pattern="*.mgh"/>
+  </mime-type>
+  <mime-type type="image/x-compressed-mgh">
+    <comment>FreeSurfer MGZ medical image (gzip-compressed MGH)</comment>
+    <acronym>MGZ</acronym>
+    <sub-class-of type="application/gzip"/>
+    <generic-icon name="image-x-generic"/>
+    <glob pattern="*.mgz"/>
+    <glob pattern="*.mgh.gz"/>
+  </mime-type>
+  <mime-type type="image/x-mrtrix">
+    <comment>MRtrix medical image</comment>
+    <generic-icon name="image-x-generic"/>
+    <magic priority="60">
+      <match type="string" value="mrtrix image" offset="0"/>
+    </magic>
+    <glob pattern="*.mif"/>
+  </mime-type>
+  <!-- FrameMaker's own .mif files start with "<MIFFile": with this magic the
+       content decides between the two types (shared-mime-info only has a glob). -->
+  <mime-type type="application/x-mif">
+    <magic priority="60">
+      <match type="string" value="&lt;MIFFile" offset="0"/>
+    </magic>
+  </mime-type>
+  <mime-type type="image/x-compressed-mrtrix">
+    <comment>MRtrix medical image (gzip-compressed)</comment>
+    <sub-class-of type="application/gzip"/>
+    <generic-icon name="image-x-generic"/>
+    <glob pattern="*.mif.gz"/>
+  </mime-type>
+  <mime-type type="image/x-nrrd">
+    <comment>NRRD medical image</comment>
+    <acronym>NRRD</acronym>
+    <expanded-acronym>Nearly Raw Raster Data</expanded-acronym>
+    <generic-icon name="image-x-generic"/>
+    <magic priority="60">
+      <match type="string" value="NRRD000" offset="0"/>
+    </magic>
+    <glob pattern="*.nrrd"/>
+  </mime-type>
+  <mime-type type="image/x-nrrd-header">
+    <comment>NRRD medical image header (data in other files)</comment>
+    <acronym>NRRD</acronym>
+    <expanded-acronym>Nearly Raw Raster Data</expanded-acronym>
+    <generic-icon name="image-x-generic"/>
+    <magic priority="60">
+      <match type="string" value="NRRD000" offset="0"/>
+    </magic>
+    <glob pattern="*.nhdr"/>
+  </mime-type>
+  <mime-type type="image/x-metaimage">
+    <comment>MetaImage medical image</comment>
+    <expanded-acronym>ITK MetaImage</expanded-acronym>
+    <generic-icon name="image-x-generic"/>
+    <magic priority="60">
+      <match type="string" value="ObjectType = Image" offset="0"/>
+    </magic>
+    <glob pattern="*.mha"/>
+  </mime-type>
+  <mime-type type="image/x-metaimage-header">
+    <comment>MetaImage medical image header (data in another file)</comment>
+    <expanded-acronym>ITK MetaImage</expanded-acronym>
+    <generic-icon name="image-x-generic"/>
+    <glob pattern="*.mhd"/>
+  </mime-type>
+</mime-info>

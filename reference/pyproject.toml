@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nifti-preview-ref"
+version = "0.1.0"
+description = "Reference NIfTI preview implementation (nibabel) used as a test oracle for the Rust backend"
+license = "GPL-2.0-or-later"
+requires-python = ">=3.10"
+authors = [{ name = "Eloi Navet" }]
+dependencies = [
+    "nibabel>=5.0,<7",
+    "numpy>=1.24,<3",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+# DICOM oracle; its decoder plugins (pylibjpeg, pylibjpeg-libjpeg,
+# pylibjpeg-openjpeg, pyjpegls) are needed for the compressed files.
+dicom = ["pydicom>=3,<4"]
+
+[project.scripts]
+nifti-preview-ref = "nifti_preview_ref.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

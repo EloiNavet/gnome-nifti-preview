@@ -1,0 +1,31 @@
+[package]
+name = "gnome-nifti-preview-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "GPL-2.0-or-later"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+gnome-nifti-preview = { path = ".." }
+
+# Not part of the backend's own build.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "open_load_render"
+path = "fuzz_targets/open_load_render.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decoders"
+path = "fuzz_targets/decoders.rs"
+test = false
+doc = false
+bench = false
