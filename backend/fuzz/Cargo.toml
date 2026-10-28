@@ -11,6 +11,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 gnome-nifti-preview = { path = ".." }
+nitty = { path = "../terminal" }
 
 # Not part of the backend's own build.
 [workspace]
@@ -26,6 +27,13 @@ bench = false
 [[bin]]
 name = "decoders"
 path = "fuzz_targets/decoders.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "terminal"
+path = "fuzz_targets/terminal.rs"
 test = false
 doc = false
 bench = false

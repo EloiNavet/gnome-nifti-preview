@@ -68,6 +68,46 @@ in the applications menu, or the gear button of a preview: see [settings](docs/S
 
 To remove it: `~/.local/share/gnome-nifti-preview/uninstall.sh`
 
+## In a terminal
+
+The same images over SSH, on a cluster or in a container, without GNOME: `nitty`.
+
+```sh
+wget -qO- https://raw.githubusercontent.com/EloiNavet/gnome-nifti-preview/main/get.sh | bash -s -- --terminal
+```
+
+It installs one static program in `~/.local/bin` (or `/usr/local/bin` as root), and nothing
+else; with Rust and a C compiler (`build-essential`: two of the image decoders are in C),
+`cargo install --locked --git https://github.com/EloiNavet/gnome-nifti-preview nitty` builds it
+instead. Every format of the preview is read, DICOM series included.
+
+```sh
+nitty T1w.nii.gz            # the viewer (q quits, ? lists the keys)
+nitty -p T1w.nii.gz         # a quick look: the three views, printed, and back to the prompt
+nitty -p --info --legend aparc+aseg.mgz    # with the metadata and the labels' names and volumes
+```
+
+Terminals that draw images (Kitty, Ghostty, WezTerm, iTerm2, Konsole, foot, xterm with Sixel...) get
+real pictures, through whichever protocol they say they have (Kitty's, iTerm2's or Sixel); the others
+(GNOME Terminal, Ptyxis, the Linux console) get coloured half-blocks, and so does tmux unless it was
+built to draw Sixel. A dumb terminal (`TERM=dumb`) gets characters by brightness; a pipe or a file
+gets the half-blocks in colour, and `--protocol ascii` plain text. See
+[compatibility](docs/COMPATIBILITY.md#terminal-viewer-nitty).
+
+| | |
+|---|---|
+| <kbd>←</kbd> <kbd>→</kbd> <kbd>↑</kbd> <kbd>↓</kbd>, click | Move the cursor in the active view (<kbd>Shift</kbd>: 10 voxels) |
+| <kbd>PgUp</kbd> <kbd>PgDn</kbd>, <kbd>Z</kbd> <kbd>X</kbd>, wheel | Slices of the active view |
+| <kbd>V</kbd>, <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>0</kbd> | Next view; one view alone, all three |
+| <kbd>O</kbd>, <kbd>L</kbd>, <kbd>P</kbd> | Orientation; labels or grayscale; palette |
+| <kbd>W</kbd> <kbd>B</kbd> <kbd>R</kbd> | Window narrower and darker (<kbd>Shift</kbd>: wider, brighter); automatic again |
+| <kbd>,</kbd> <kbd>.</kbd>, <kbd>[</kbd> <kbd>]</kbd>, <kbd>N</kbd> (<kbd>Shift</kbd>) | 4D volumes, DICOM series, next (previous) file |
+| <kbd>Tab</kbd> | Metadata, labels and their volumes, time course of the voxel |
+
+`nitty --help` lists the options (`--protocol`, `--colors`, `--view`, `--at`, `--window`...). Ideas
+were taken from [niicat](https://github.com/MIC-DKFZ/niicat) (the quick look) and
+[headjack](https://github.com/childmindresearch/headjack) (the viewer in half blocks).
+
 ## More
 
 [Troubleshooting](docs/TROUBLESHOOTING.md) ·

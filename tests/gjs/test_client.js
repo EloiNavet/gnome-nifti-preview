@@ -1,6 +1,6 @@
 // Headless GJS tests for the shared client and view state, against the real
 // Rust backend. Run: NIFTI_PREVIEW_BACKEND=backend/target/release/nifti-preview \
-//   gjs tests/gjs/test_client.js FIXTURE_DIR
+//   [NITTY_BIN=backend/target/release/nitty] gjs tests/gjs/test_client.js FIXTURE_DIR
 //
 // FIXTURE_DIR must contain the files written by `nifti-preview-ref make-fixtures`.
 
@@ -987,10 +987,148 @@ async function testSettingsApplied() {
     check(await waitGone(lastPid, 2000), 'backend exits');
 }
 
+/** A float NIfTI-1 file of 4 × 4 × 4 voxels of 1 mm (sform), NaN at voxel (1, 2, 3). */
+function nanImage(path) {
+    const buf = new ArrayBuffer(352 + 4 * 64);
+    const d = new DataView(buf);
+    d.setInt32(0, 348, true);
+    [3, 4, 4, 4, 1, 1, 1, 1].forEach((n, i) => d.setInt16(40 + 2 * i, n, true));
+    d.setInt16(70, 16, true); // float32
+    d.setInt16(72, 32, true);
+    for (let i = 0; i < 8; i++)
+        d.setFloat32(76 + 4 * i, 1, true);
+    d.setFloat32(108, 352, true);
+    d.setInt16(254, 1, true); // sform: scanner
+    for (let r = 0; r < 3; r++)
+        d.setFloat32(280 + 16 * r + 4 * r, 1, true);
+    new Uint8Array(buf).set([0x6e, 0x2b, 0x31, 0], 344); // "n+1"
+    for (let k = 0; k < 4; k++) {
+        for (let j = 0; j < 4; j++) {
+            for (let i = 0; i < 4; i++)
+                d.setFloat32(352 + 4 * (i + 4 * j + 16 * k), i === 1 && j === 2 && k === 3 ? NaN : 0.25 * (i + j + k), true);
+        }
+    }
+    GLib.file_set_contents(path, new Uint8Array(buf));
+}
+
+/**
+ * The terminal viewer (nitty) writes the same panel, readout, label list and
+ * volume line as this viewer: its Rust port (backend/src/panel.rs) against
+ * the JavaScript, on the fixtures, a NaN, a DICOM series (patient shown or
+ * not) and points given with --at. Skipped without NITTY_BIN.
+ */
+async function testTerminalParity() {
+    const nitty = GLib.getenv('NITTY_BIN');
+    if (!nitty) {
+        print('  (skipped: NITTY_BIN not set)');
+        return;
+    }
+    const {labelRows, volumeText} = imports.niftiPreview.viewState;
+    const run = args => {
+        const proc = Gio.Subprocess.new([nitty, '-p', '--panel-json', ...args],
+            Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
+        const [, out, err] = proc.communicate_utf8(null, null);
+        let json = null;
+        try {
+            json = JSON.parse(out);
+        } catch (e) {
+            json = null;
+        }
+        return {status: proc.get_exit_status(), json, err};
+    };
+    const strip = sections => sections.map(s => (s.rows ? {title: s.title, rows: s.rows.map(r => [r[0], r[1]])} : {title: s.title, text: s.text}));
+    const dir = GLib.dir_make_tmp('np-parity-XXXXXX');
+    const made = [];
+    try {
+        const nan = GLib.build_filenamev([dir, 'nan.nii']);
+        nanImage(nan);
+        made.push(nan);
+        for (let k = 0; k < 3; k++) {
+            const f = GLib.build_filenamev([dir, `a${k}.dcm`]);
+            GLib.file_set_contents(f, dicomSlice('1.2.3.1', k, 'T1'));
+            made.push(f);
+        }
+        const dicom = made[2];
+        const cases = ['sub-001_T1w.nii.gz', 'sub-001_T1w_LPS.nii.gz', 'sub-001_T1w_oblique.nii.gz', 'sub-001_bold.nii.gz',
+            'sub-001_dseg.nii.gz', 'sub-01_dseg.nii.gz', 'sub-001_rgb.nii.gz', 'sub-001_svs.nii.gz', 'sub-001_mrsi.nii.gz',
+            'sub 001 with spaces.nii'].map(name => ({name, path: fx(name)}));
+        cases.push({name: 'NaN image', path: nan}, {name: 'NaN voxel', path: nan, at: [1, 2, 3]},
+            {name: 'another label', path: fx('sub-001_dseg.nii.gz'), at: 'label'},
+            {name: 'DICOM series', path: dicom}, {name: 'DICOM series, patient shown', path: dicom, patient: true});
+        for (const t of cases) {
+            const c = new BackendClient();
+            const state = new ViewState(c, {onError: e => check(false, `${t.name}: unexpected error ${e.message}`)},
+                {showPatient: Boolean(t.patient)});
+            try {
+                await state.open(t.path);
+                let at = t.at;
+                if (at === 'label') {
+                    // A voxel of another label than the one the view starts on.
+                    const first = (await c.value(state.cursor)).value;
+                    at = null;
+                    for (let i = 0; i < state.grid.shape[0] && !at; i++) {
+                        const p = [i, state.cursor[1], state.cursor[2]];
+                        const v = (await c.value(p)).value;
+                        if (v && v !== first)
+                            at = p;
+                    }
+                    check(at !== null && !state.grid.resampled, `${t.name}: a second label found`);
+                    if (!at)
+                        continue;
+                }
+                if (at)
+                    state.cursor = at;
+                const reply = await c.value(state.cursor);
+                state.reading = {ijk: state.cursor, voxel: reply.voxel, value: reply.value, rgb: reply.rgb ?? null,
+                    labelVolume: reply.label_volume_mm3 ?? null, labelName: reply.label_name ?? null, world: reply.world};
+                const args = [...(at ? ['--at', at.join(',')] : []), ...(t.patient ? ['--patient'] : []), t.path];
+                const r = run(args);
+                check(r.status === 0 && r.json, `${t.name}: nitty ${args.join(' ')} exits with 0 (${r.status}: ${r.err})`);
+                if (!r.json)
+                    continue;
+                const theirs = r.json;
+                check(JSON.stringify(theirs.cursor) === JSON.stringify(state.cursor), `${t.name}: same cursor (${theirs.cursor} vs ${state.cursor})`);
+                const mine = JSON.stringify(strip(metadataSections(state)));
+                const rust = JSON.stringify(strip(theirs.sections));
+                check(mine === rust, `${t.name}: same panel\n  js:   ${mine}\n  rust: ${rust}`);
+                check(theirs.readout === readoutText(state), `${t.name}: same readout (${JSON.stringify(theirs.readout)} vs ${JSON.stringify(readoutText(state))})`);
+                check(theirs.effective_colormap === state.effectiveColormap, `${t.name}: same colormap`);
+                // The label list (names escaped for Pango on this side).
+                state.labelList = null;
+                if (state.stats?.labels?.is_labels) {
+                    let labels = await c.labels();
+                    for (let n = 0; !labels.complete && n < 200; n++) {
+                        await sleep(20);
+                        labels = await c.labels();
+                    }
+                    state.labelList = {labels: labels.labels ?? [], complete: labels.complete, scheme: labels.scheme};
+                }
+                const myLabels = JSON.stringify(labelRows(state).map(l => [l.name, l.volume]));
+                const rustLabels = JSON.stringify((theirs.labels ?? []).map(([n, v]) => [GLib.markup_escape_text(n, -1), v]));
+                check(myLabels === rustLabels, `${t.name}: same labels\n  js:   ${myLabels}\n  rust: ${rustLabels}`);
+                // The line beside the volume slider, where there is one.
+                const h = state.header;
+                const myVolume = !h.mrs && h.n_volumes > 1 ? volumeText(state) : null;
+                check(theirs.volume === myVolume, `${t.name}: same volume line (${JSON.stringify(theirs.volume)} vs ${JSON.stringify(myVolume)})`);
+            } finally {
+                state.destroy();
+                c.close();
+            }
+        }
+        // A point outside the image: refused, with the image's size.
+        const r = run(['--at', '999,0,0', fx('sub-001_T1w.nii.gz')]);
+        check(r.status === 2 && r.err.includes('outside the image'), `--at outside refused (${r.status}: ${r.err})`);
+    } finally {
+        for (const f of made)
+            GLib.unlink(f);
+        GLib.rmdir(dir);
+    }
+}
+
 async function main() {
     for (const t of [testPipelinedSession, testInvalidFiles, testMissingBinary, testBackendCrash, testHostileBackend,
         testCallbackErrors,
-        testViewStateCoalescing, testVolumes, testObliqueAndColour, testSpectroscopy, testLabelVolume, testSettings, testSettingsApplied, testDicomSeries, testAbout, testNetwork, testRepeatedOpenClose]) {
+        testViewStateCoalescing, testVolumes, testObliqueAndColour, testSpectroscopy, testLabelVolume, testSettings, testSettingsApplied, testDicomSeries, testAbout, testNetwork, testRepeatedOpenClose, testTerminalParity]) {
         print(`- ${t.name}`);
         try {
             await t();

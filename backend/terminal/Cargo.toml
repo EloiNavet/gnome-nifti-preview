@@ -1,0 +1,32 @@
+[package]
+name = "nitty"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.85"
+license = "GPL-2.0-or-later"
+description = "Medical images in the terminal (NIfTI, MGH, MRtrix, NRRD, MetaImage, DICOM): a quick look or an interactive viewer"
+authors = ["Eloi Navet"]
+repository = "https://github.com/EloiNavet/gnome-nifti-preview"
+publish = false
+
+[lib]
+name = "nitty"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nitty"
+path = "src/main.rs"
+
+[dependencies]
+gnome-nifti-preview = { path = "..", default-features = false }
+libc = "0.2"
+serde_json = "1"
+
+[features]
+default = ["libdeflate", "openjpeg"]
+# The decoders of the library (C, vendored): see backend/Cargo.toml.
+libdeflate = ["gnome-nifti-preview/libdeflate"]
+openjpeg = ["gnome-nifti-preview/openjpeg"]
+
+[dev-dependencies]
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }

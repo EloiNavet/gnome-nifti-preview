@@ -5,7 +5,6 @@
 //! followed immediately by `bytes` raw RGB8 bytes. One process serves one
 //! preview and exits on EOF or after `close`. See docs/PROTOCOL.md.
 
-use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
@@ -16,81 +15,14 @@ use serde_json::{json, Map, Value};
 use crate::error::{bail, PreviewError, Result};
 use crate::orientation::{self, Grid, MODES, VIEWS};
 use crate::render::{self, COLORMAPS};
+use crate::view::{self, LoadState, Loading};
 use crate::volume::{self, Volume, WindowPolicy};
 use crate::window::PALETTES;
 
 pub const PROTOCOL_VERSION: u32 = 2;
 pub const MAX_REQUEST_BYTES: usize = 1 << 20;
 pub const DEFAULT_CACHE_BYTES: usize = 64 << 20;
-/// Bookkeeping counted per cached slice on top of its pixels.
-const CACHE_ENTRY_OVERHEAD: usize = 256;
-
-/// Mode, colormap, view, slice index and volume.
-type Key = (&'static str, &'static str, &'static str, usize, usize);
-
-pub struct SliceCache {
-    max_bytes: usize,
-    size: usize,
-    items: HashMap<Key, (Arc<Vec<u8>>, usize, usize)>,
-    order: VecDeque<Key>,
-}
-
-impl SliceCache {
-    pub fn new(max_bytes: usize) -> Self {
-        SliceCache { max_bytes, size: 0, items: HashMap::new(), order: VecDeque::new() }
-    }
-
-    fn touch(&mut self, key: &Key) {
-        if let Some(pos) = self.order.iter().position(|k| k == key) {
-            let k = self.order.remove(pos).unwrap();
-            self.order.push_back(k);
-        }
-    }
-
-    pub fn get(&mut self, key: &Key) -> Option<(Arc<Vec<u8>>, usize, usize)> {
-        let hit = self.items.get(key).cloned();
-        if hit.is_some() {
-            self.touch(key);
-        }
-        hit
-    }
-
-    pub fn put(&mut self, key: Key, value: (Arc<Vec<u8>>, usize, usize)) {
-        let cost = value.0.len() + CACHE_ENTRY_OVERHEAD;
-        if cost > self.max_bytes {
-            return;
-        }
-        if let Some(old) = self.items.remove(&key) {
-            self.size -= old.0.len() + CACHE_ENTRY_OVERHEAD;
-            if let Some(pos) = self.order.iter().position(|k| *k == key) {
-                self.order.remove(pos);
-            }
-        }
-        self.items.insert(key, value);
-        self.order.push_back(key);
-        self.size += cost;
-        while self.size > self.max_bytes {
-            let Some(old) = self.order.pop_front() else { break };
-            if let Some(v) = self.items.remove(&old) {
-                self.size -= v.0.len() + CACHE_ENTRY_OVERHEAD;
-            }
-        }
-    }
-
-    pub fn clear(&mut self) {
-        self.items.clear();
-        self.order.clear();
-        self.size = 0;
-    }
-
-    pub fn len(&self) -> usize {
-        self.items.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
-    }
-}
+pub use crate::view::SliceCache;
 
 pub enum Reply {
     Json(Value),
@@ -109,20 +41,6 @@ pub struct Session {
     /// system): the volume is with it until it is done.
     loading: Option<Loading>,
     pub closed: bool,
-}
-
-/// A volume being read on a helper thread, and how far it got.
-struct Loading {
-    done: std::sync::mpsc::Receiver<(Box<Volume>, Result<()>)>,
-    progress: Arc<crate::progress::Progress>,
-    started: std::time::Instant,
-}
-
-impl Drop for Loading {
-    /// A load given up (another file, close): its reads stop.
-    fn drop(&mut self) {
-        self.progress.cancel();
-    }
 }
 
 fn opt_bool(req: &Value, key: &str) -> Result<bool> {
@@ -306,13 +224,7 @@ impl Session {
         let grid = self.grid()?;
         // A DICOM series opens on the file chosen.
         let v = self.volume.as_ref().unwrap();
-        let cursor = match v.header.dicom.as_ref().and_then(|d| d.start) {
-            Some((voxel, _)) => {
-                let w = orientation::voxel_to_world(&v.affine, voxel.map(|x| x as f64));
-                if grid.resampled || v.orientation_known { grid.from_world(w) } else { voxel }
-            }
-            None => grid.center(),
-        };
+        let cursor = view::start_cursor(v, &grid);
         let mut m = Map::new();
         m.insert("header".into(), header);
         m.insert("cursor".into(), json!(cursor));
@@ -324,15 +236,7 @@ impl Session {
     /// The DICOM series next to the image (its folder, or its DICOMDIR),
     /// grouped by study in the client.
     fn op_series_list(&mut self) -> Result<Reply> {
-        let v = self.volume()?;
-        let Some(info) = v.header.dicom.as_mut() else { bail!("bad_request", "Not a DICOM image") };
-        if info.catalog.is_none() {
-            let Some(folder) = info.folder.clone() else { bail!("not_found", "No folder to look for series in") };
-            let (catalog, _) = crate::formats::dicom::catalog::scan_folder(&folder, None, None)?;
-            info.catalog = Some(Arc::new(catalog));
-        }
-        let catalog = info.catalog.clone().unwrap();
-        let current = info.series_uid.clone();
+        let (catalog, current) = view::series_catalog(self.volume()?)?;
         let series: Vec<Value> = catalog
             .related(current.as_deref())
             .into_iter()
@@ -358,18 +262,7 @@ impl Session {
             Some(m) => static_choice(m, &MODES, "mode")?,
             None => self.mode,
         };
-        let v = self.volume()?;
-        let Some(info) = v.header.dicom.as_ref() else { bail!("bad_request", "Not a DICOM image") };
-        let Some(catalog) = info.catalog.clone() else { bail!("bad_request", "List the series first (series_list)") };
-        let Some(entry) = catalog.find(uid) else { bail!("not_found", "No series {uid:?} here") };
-        let folder = info.folder.clone();
-        let header = crate::formats::dicom::open_entry(entry, catalog.clone(), folder)?;
-        let first = entry.files.first().cloned().unwrap_or_default();
-        let file = crate::source::open_data_file(&first)?;
-        let file_size = file.metadata().map_err(crate::source::io_error)?.len();
-        let storage = crate::storage::of(&file, &first);
-        let opened = crate::source::Opened { header, extensions: Vec::new(), compressed: false, file_size, file, storage };
-        let volume = Volume::from_opened(&first, opened, volume::max_bytes_from_env())?;
+        let volume = view::open_series(self.volume()?, uid)?;
         self.opened(volume, mode)
     }
 
@@ -378,18 +271,7 @@ impl Session {
     /// of the labels, for the client to start there.
     fn label_cursor(&mut self) -> Result<Option<Value>> {
         let grid = self.grid()?;
-        let v = self.volume()?;
-        let Some((centre, planes)) = v.label_extent()? else { return Ok(None) };
-        let at = grid.to_voxel(grid.center());
-        let empty = (0..3).any(|a| {
-            let i = (at[a].round().max(0.0) as usize).min(planes[a].len() - 1);
-            planes[a][i] == 0
-        });
-        if !empty {
-            return Ok(None);
-        }
-        let world = orientation::voxel_to_world(&v.affine, centre);
-        Ok(Some(json!(grid.from_world(world))))
+        Ok(view::label_cursor(self.volume()?, &grid)?.map(|c| json!(c)))
     }
 
     /// Statistics of the volume shown, its colormaps.
@@ -428,8 +310,8 @@ impl Session {
     fn op_load(&mut self, req: &Value) -> Result<Reply> {
         // A background load: how far it got, or its result.
         if let Some(job) = &self.loading {
-            match job.done.try_recv() {
-                Ok((volume, result)) => {
+            match job.poll() {
+                LoadState::Done(volume, result) => {
                     self.loading = None;
                     self.volume = Some(*volume);
                     result?;
@@ -442,14 +324,12 @@ impl Session {
                     }
                     return Ok(Reply::Json(Value::Object(m)));
                 }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    let seconds = job.started.elapsed().as_secs_f64();
-                    let rate = job.progress.bytes().filter(|_| seconds > 0.2).map(|b| b as f64 / seconds);
+                LoadState::Running => {
                     return Ok(Reply::Json(json!({
-                        "ready": false, "progress": job.progress.fraction(), "bytes_per_second": rate,
+                        "ready": false, "progress": job.fraction(), "bytes_per_second": job.rate(),
                     })));
                 }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                LoadState::Lost => {
                     self.loading = None;
                     bail!("internal", "Internal error while reading the image.");
                 }
@@ -533,40 +413,13 @@ impl Session {
     /// Read the data of `volume` (and its statistics) on a helper thread;
     /// the volume back when no thread can be started.
     fn start_loading(&mut self, volume: Box<Volume>) -> std::result::Result<Value, Box<Volume>> {
-        let progress = Arc::new(crate::progress::Progress::default());
-        let (tx, rx) = std::sync::mpsc::channel();
-        let shared = progress.clone();
-        // The thread takes the volume from here; a thread that never ran leaves it.
-        let slot = Arc::new(std::sync::Mutex::new(Some(volume)));
-        let theirs = slot.clone();
-        let spawned = std::thread::Builder::new().name("load".into()).spawn(move || {
-            let Some(mut volume) = theirs.lock().unwrap_or_else(|p| p.into_inner()).take() else { return };
-            crate::progress::set(Some(shared));
-            let result = catch_unwind(AssertUnwindSafe(|| -> Result<()> {
-                volume.ensure_data()?;
-                volume.stats()?;
-                Ok(())
-            }))
-            .unwrap_or_else(|_| Err(PreviewError::new("internal", "Internal error while reading the image.")));
-            crate::progress::set(None);
-            let _ = tx.send((volume, result));
-        });
-        match spawned {
-            Ok(_) => {
-                self.loading = Some(Loading { done: rx, progress, started: std::time::Instant::now() });
-                Ok(json!({"ready": false, "progress": 0.0, "bytes_per_second": null}))
-            }
-            Err(_) => Err(slot.lock().unwrap_or_else(|p| p.into_inner()).take().expect("the thread never started")),
-        }
+        self.loading = Some(Loading::start(volume)?);
+        Ok(json!({"ready": false, "progress": 0.0, "bytes_per_second": null}))
     }
 
     /// Time of volume `k` (k × TR) for a 4D series with a repetition time.
     fn volume_time(&mut self, k: usize) -> Result<Value> {
-        let h = &self.volume()?.header;
-        Ok(match h.repetition_time {
-            Some(tr) if h.ndim() == 4 && tr.is_finite() && tr > 0.0 => json!(k as f64 * tr),
-            _ => Value::Null,
-        })
+        Ok(json!(view::volume_time(&self.volume()?.header, k)))
     }
 
     /// Show another volume of a 4D image. A volume still being decompressed
@@ -591,12 +444,7 @@ impl Session {
     /// Values of the voxel nearest to grid point `ijk` in every volume.
     fn op_timecourse(&mut self, req: &Value) -> Result<Reply> {
         let ijk = ijk_of(req.get("ijk"), "timecourse requires 'ijk' as three integers")?;
-        let grid = self.grid()?;
-        if (0..3).any(|a| ijk[a] < 0 || ijk[a] as usize >= grid.shape[a]) {
-            bail!("bad_request", "Voxel {:?} outside image {:?}", ijk, grid.shape);
-        }
-        let g = ijk.map(|x| x as usize);
-        let voxel = if grid.resampled { grid.nearest(grid.to_voxel(g)) } else { Some(g) };
+        let voxel = view::voxel_under(&self.grid()?, ijk)?;
         let v = self.volume()?;
         let (tr, units) = (v.header.repetition_time, v.header.time_units());
         let (values, complete) = match voxel {
@@ -652,15 +500,7 @@ impl Session {
         let after = self.grid()?;
         let mut m = self.display()?;
         if let Some(c) = cursor {
-            let c = c.map(|x| x.max(0) as usize);
-            let c = [0, 1, 2].map(|a| c[a].min(before.shape[a] - 1));
-            // Grids of the same kind are the same grid (one image).
-            let moved = if before.resampled == after.resampled {
-                c
-            } else {
-                after.from_world(orientation::voxel_to_world(&before.affine, c.map(|x| x as f64)))
-            };
-            m.insert("cursor".into(), json!(moved));
+            m.insert("cursor".into(), json!(view::carry_cursor(&before, &after, c)));
         }
         m.insert("colormap".into(), json!(colormap));
         let v = self.volume()?;
@@ -723,12 +563,7 @@ impl Session {
             None | Some(Value::Null) => Some(self.volume()?.center()),
             Some(v) => {
                 let ijk = ijk_of(Some(v), "spectrum 'ijk' must be three integers")?;
-                let grid = self.grid()?;
-                if (0..3).any(|a| ijk[a] < 0 || ijk[a] as usize >= grid.shape[a]) {
-                    bail!("bad_request", "Voxel {:?} outside image {:?}", ijk, grid.shape);
-                }
-                let g = ijk.map(|x| x as usize);
-                if grid.resampled { grid.nearest(grid.to_voxel(g)) } else { Some(g) }
+                view::voxel_under(&self.grid()?, ijk)?
             }
         };
         let Some(voxel) = voxel else { return Ok(Reply::Json(json!({"voxel": null}))) };
@@ -747,39 +582,20 @@ impl Session {
     fn op_value(&mut self, req: &Value) -> Result<Reply> {
         let ijk = ijk_of(req.get("ijk"), "value requires 'ijk' as three integers")?;
         let grid = self.grid()?;
-        if (0..3).any(|a| ijk[a] < 0 || ijk[a] as usize >= grid.shape[a]) {
-            bail!("bad_request", "Voxel {:?} outside image {:?}", ijk, grid.shape);
-        }
-        let g = ijk.map(|x| x as usize);
-        let voxel = if grid.resampled { grid.nearest(grid.to_voxel(g)) } else { Some(g) };
-        let v = self.volume()?;
-        let value = match voxel {
-            Some(p) => v.exact_value_at(p.map(|x| x as i64))?,
-            None => None,
-        };
-        // In mm, whatever the spatial unit of the header (as the volumes).
-        let mm = v.mm_per_unit();
-        let world = orientation::voxel_to_world(&grid.affine, g.map(|x| x as f64)).map(|x| x * mm);
-        let categorical = value.is_some() && v.stats()?.labels.is_labels;
-        let json_value = value.map(|x| if categorical { x.to_label_json() } else { x.to_json() });
-        let mut reply = json!({"ijk": ijk, "world": world, "voxel": voxel, "value": json_value});
-        if let Some(p) = voxel {
-            if let Some(rgb) = v.rgb_at(p)? {
-                reply["rgb"] = json!(rgb);
-            }
+        let r = view::readout(self.volume()?, &grid, ijk)?;
+        let json_value = r.value.map(|x| if r.categorical { x.to_label_json() } else { x.to_json() });
+        let mut reply = json!({"ijk": r.ijk, "world": r.world_mm, "voxel": r.voxel, "value": json_value});
+        if let Some(rgb) = r.rgb {
+            reply["rgb"] = json!(rgb);
         }
         // In a label map, the name and size of the structure under the cursor.
-        if let Some(x) = value.filter(|x| !x.is_zero()) {
-            if categorical {
-                if let Some(e) = v.label_table().and_then(|t| t.get(&x.label_id())) {
-                    reply["label_name"] = json!(e.name);
-                }
-                let n = v.count_equal(x)?;
-                reply["label_voxels"] = json!(n);
-                let mm3 = n as f64 * v.voxel_volume_mm3();
-                if mm3.is_finite() {
-                    reply["label_volume_mm3"] = json!(mm3);
-                }
+        if let Some(label) = r.label {
+            if let Some(name) = label.name {
+                reply["label_name"] = json!(name);
+            }
+            reply["label_voxels"] = json!(label.voxels);
+            if let Some(mm3) = label.volume_mm3 {
+                reply["label_volume_mm3"] = json!(mm3);
             }
         }
         Ok(Reply::Json(reply))
@@ -790,27 +606,16 @@ impl Session {
     /// The labels of the volume shown: value, name (from the colour table),
     /// colour, number of voxels and volume in mm³, in increasing order.
     fn op_labels(&mut self) -> Result<Reply> {
-        let v = self.volume()?;
-        let s = v.stats()?;
-        if !s.labels.is_labels {
-            return Ok(Reply::Json(json!({"labels": [], "complete": true, "scheme": ""})));
-        }
-        let (binary, scheme) = (s.labels.binary, s.labels.scheme);
-        let (counts, complete) = v.label_counts()?;
-        let mm3 = v.voxel_volume_mm3();
-        let table = v.label_table();
-        let list: Vec<Value> = counts
+        let list = view::label_rows(self.volume()?)?;
+        let rows: Vec<Value> = list
+            .rows
             .iter()
-            .map(|(value, n)| {
-                let id = value.label_id();
-                let entry = table.and_then(|t| t.get(&id));
-                let rgb = if binary { [255, 255, 255] } else { entry.map_or_else(|| crate::labels::label_color(id), |e| e.rgb) };
-                let volume = *n as f64 * mm3;
-                json!({"label": value.to_label_json(), "name": entry.map(|e| e.name.clone()), "rgb": rgb, "voxels": n,
-                       "volume_mm3": if volume.is_finite() { json!(volume) } else { Value::Null }})
+            .map(|r| {
+                json!({"label": r.value.to_label_json(), "name": r.name, "rgb": r.rgb, "voxels": r.voxels,
+                       "volume_mm3": r.volume_mm3})
             })
             .collect();
-        Ok(Reply::Json(json!({"labels": list, "complete": complete, "scheme": scheme})))
+        Ok(Reply::Json(json!({"labels": rows, "complete": list.complete, "scheme": list.scheme})))
     }
 }
 

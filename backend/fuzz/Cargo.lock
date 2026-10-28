@@ -54,7 +54,7 @@ dependencies = [
 
 [[package]]
 name = "gnome-nifti-preview"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "libdeflater",
@@ -69,6 +69,7 @@ version = "0.0.0"
 dependencies = [
  "gnome-nifti-preview",
  "libfuzzer-sys",
+ "nitty",
 ]
 
 [[package]]
@@ -134,6 +135,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "nitty"
+version = "0.2.0"
+dependencies = [
+ "gnome-nifti-preview",
+ "libc",
+ "serde_json",
 ]
 
 [[package]]

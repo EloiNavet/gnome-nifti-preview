@@ -9,7 +9,7 @@ The process exits on EOF or after `close`.
 On start the backend writes:
 
 ```json
-{"event":"hello","protocol":2,"version":"0.1.0","pid":1234,"backend":"rust",
+{"event":"hello","protocol":2,"version":"0.2.0","pid":1234,"backend":"rust",
  "sandbox":{"data_limit":4630511616,"no_new_privs":true,"seccomp":true,"landlock":7}}
 ```
 

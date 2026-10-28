@@ -1,7 +1,10 @@
 name: Release
 
-# Push a tag such as v0.1.0 to publish the archive with prebuilt backends that
-# get.sh downloads (releases/latest/download/gnome-nifti-preview.tar.gz).
+# Push a tag such as v0.1.0 to publish the archives get.sh downloads
+# (releases/latest/download/): gnome-nifti-preview.tar.gz with the prebuilt
+# backends, and nitty.tar.gz with the terminal viewer (static, musl). Both
+# go into the same release: a separate tag for nitty would become "latest"
+# and hide the other archive from get.sh.
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
@@ -37,8 +40,42 @@ jobs:
           name: bin-${{ matrix.arch }}
           path: backend/target/release/nifti-preview
 
+  terminal:
+    strategy:
+      matrix:
+        # Static (musl) binaries: they run on any Linux, old clusters and
+        # minimal containers included.
+        include: >-
+          ${{ fromJSON(github.event.repository.private
+          && '[{"runner": "ubuntu-22.04", "arch": "x86_64"}]'
+          || '[{"runner": "ubuntu-22.04", "arch": "x86_64"}, {"runner": "ubuntu-22.04-arm", "arch": "aarch64"}]') }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: |
+          rustup toolchain install stable --profile minimal --target ${{ matrix.arch }}-unknown-linux-musl
+          rustup default stable
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends musl-tools
+      - working-directory: backend
+        env:
+          # The C decoders: musl-tools has musl-gcc, but cc looks for
+          # aarch64-linux-musl-gcc on ARM unless told.
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        run: |
+          cargo build -p nitty --release --locked --target ${{ matrix.arch }}-unknown-linux-musl
+          cargo test -p nitty --release --locked
+          target/${{ matrix.arch }}-unknown-linux-musl/release/nitty --version
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nitty-${{ matrix.arch }}
+          path: backend/target/${{ matrix.arch }}-unknown-linux-musl/release/nitty
+
   package:
-    needs: build
+    needs: [build, terminal]
     runs-on: ubuntu-24.04
     # Only this job can write: it publishes what every get.sh downloads, so it
     # runs no third-party action (gh is GitHub's own CLI on the runner).
@@ -63,11 +100,23 @@ jobs:
             fi
           done
           tools/package.sh "${GITHUB_REF_NAME#v}" dist "${args[@]}"
+      - name: Assemble the terminal viewer's archive (get.sh --terminal)
+        run: |
+          args=()
+          for a in x86_64 aarch64; do
+            if [ -f "artifacts/nitty-$a/nitty" ]; then
+              chmod +x "artifacts/nitty-$a/nitty"
+              args+=("$a=artifacts/nitty-$a/nitty")
+            fi
+          done
+          tools/package.sh --terminal "${GITHUB_REF_NAME#v}" dist "${args[@]}"
       - name: Build provenance (public repositories)
         if: ${{ !github.event.repository.private }}
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
-          subject-path: dist/gnome-nifti-preview.tar.gz
+          subject-path: |
+            dist/gnome-nifti-preview.tar.gz
+            dist/nitty.tar.gz
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -87,11 +136,21 @@ jobs:
 
           `gnome-nifti-preview.tar.gz` holds the prebuilt backend for each architecture listed in `bin/`
           and the installer; its SHA-256 is in the `.sha256` file.
+
+          The same images in a terminal, over SSH or in a container, without GNOME: `nitty`, a quick
+          look (`nitty -p IMAGE`) or an interactive viewer. `nitty.tar.gz` holds it as a static binary
+          per architecture:
+
+          ```sh
+          wget -qO- https://raw.githubusercontent.com/EloiNavet/gnome-nifti-preview/main/get.sh | bash -s -- --terminal
+          ```
           EOF
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/gnome-nifti-preview.tar.gz dist/gnome-nifti-preview.tar.gz.sha256 --clobber
+            gh release upload "$GITHUB_REF_NAME" dist/gnome-nifti-preview.tar.gz dist/gnome-nifti-preview.tar.gz.sha256 \
+              dist/nitty.tar.gz dist/nitty.tar.gz.sha256 --clobber
           else
             pre=(); case "$GITHUB_REF_NAME" in *-*) pre=(--prerelease) ;; esac
             gh release create "$GITHUB_REF_NAME" dist/gnome-nifti-preview.tar.gz dist/gnome-nifti-preview.tar.gz.sha256 \
+              dist/nitty.tar.gz dist/nitty.tar.gz.sha256 \
               --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md "${pre[@]}"
           fi

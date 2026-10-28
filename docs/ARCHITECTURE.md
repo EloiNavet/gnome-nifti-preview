@@ -7,6 +7,8 @@ Nautilus ──Space──▶ GNOME Sushi (gjs) ──loads──▶ viewer plug
                                                     │  common/niftiPreview/     shared client + view state
                                                     ▼  Gio.Subprocess, stdin/stdout, JSON lines + raw pixels
                                        nifti-preview serve   (Rust, one process per preview)
+
+a terminal ◀──escape sequences──▶ nitty   (Rust, backend/terminal/: the same library, linked in)
 ```
 
 ## Why a Sushi plugin
@@ -86,12 +88,26 @@ Two facts about Sushi shaped the design:
 * `mrs.rs` — NIfTI-MRS spectroscopy: detection, metadata from the JSON
   extension, combination of transients, FFT (radix 2, Bluestein for other
   lengths), chemical-shift axis and zero-order phase.
-* `server.rs` — the protocol (below), an LRU slice cache (64 MiB), `catch_unwind`
-  per request, `PR_SET_PDEATHSIG` so that it dies with Sushi.
-* `sandbox.rs` — applied by `serve`: inherited descriptors closed, memory cap
+* `view.rs` — what a viewer needs besides the slices, as typed functions:
+  where the cursor starts (the image a DICOM series was opened on, the centre
+  of a sparse segmentation's labels), the value under a grid point with the
+  name, voxel count and volume of its label, the list of labels, a cursor
+  carried to another display mode's grid, the DICOM series next to an image,
+  the LRU slice cache, and a volume read on a helper thread. `server.rs` and
+  nitty both build on it.
+* `panel.rs` — the text of the side panel, of the readout and of the volume
+  line, ported from `viewState.js` with JavaScript's number formatting, for
+  viewers written in Rust (`tests/gjs` compares the two).
+* `server.rs` — the protocol (below) over `view.rs`, `catch_unwind` per
+  request, `PR_SET_PDEATHSIG` so that it dies with Sushi.
+* `sandbox.rs` — applied by `serve`, `thumbnail` and nitty: inherited descriptors closed, memory cap
   (`RLIMIT_DATA`), no new privileges, no sockets (seccomp), Landlock read-only
   (see [SECURITY.md](SECURITY.md)).
 * `main.rs` — `serve`, plus `info`, `render` and `bench` for debugging.
+
+`backend/` is also a Cargo workspace whose default member is this crate:
+`cargo build` there builds `nifti-preview` only, and the terminal viewer
+(`backend/terminal/`) shares the lock file and the release profile.
 
 **Viewers (`sushi/`, GJS)**
 * `common/niftiPreview/backendClient.js` — spawns the backend, pipelines requests,
@@ -139,6 +155,73 @@ backend, kept as a test oracle: CI checks that the Rust backend reproduces it
 (metadata, affine, plans, statistics, pixels). It also generates every test
 fixture. It is not installed for users.
 
+## Terminal viewer (nitty)
+
+`backend/terminal/` builds `nitty`, which links the library: every format,
+orientation, window, palette and label colour comes from it; nitty only puts
+its RGB8 slices on a terminal and handles the interaction. It depends on
+`libc` and `serde_json`, both already in the lock file (memmap2, the library):
+no TUI crate, no terminfo.
+
+* `viewer.rs` — an opened image as both modes show it: the volume, the display
+  mode and colormap, the three view plans, the cursor (a grid point), the
+  cache of drawn slices.
+* `picture.rs` — `render_slice` (cached) → `thumbnail::resample` to the pixels
+  the terminal has for the view (nearest voxel for labels) → the crosshair
+  drawn at that size.
+* `layout.rs` — boxes of a title row, a row of orientation letters above and
+  below the image and a column on each side; the views share one physical
+  scale and are put in a row, a column or two rows, whichever shows them
+  largest (the quick look: always a row).
+* `blocks.rs`, `graphics/` — the encoders: half blocks `▄` (upper pixel as
+  background, lower as foreground; a space when both are equal), characters by
+  brightness, Kitty's graphics protocol (the PNG of `png.rs`, transmitted in the
+  escape codes, `t=d`, chunks of 4096 bytes, sized in cells), iTerm2's inline
+  images, Sixel (an exact palette when the colours fit the registers, median
+  cut otherwise; run-length encoded), and tmux's passthrough for Kitty and
+  iTerm2.
+* `color.rs`, `screen.rs`, `text.rs` — colours in 24-bit, 256 (as tmux reduces
+  them) or 16; a grid of cells written as lines (the quick look) or as the
+  difference from the previous frame (the viewer: only changed cells, minimal
+  SGR); every character written passes one filter that drops control
+  characters, so that a file name or a header field cannot send escape
+  sequences.
+* `tty.rs`, `input.rs` — the terminal over libc: `/dev/tty` opened once, raw
+  mode, the alternate screen, mouse reports (SGR, or X10 from a terminal that
+  ignores mode 1006), signals through a pipe, the terminal restored on return,
+  on a panic of the viewer's own thread (a panic the library catches on one of
+  its threads is held and printed afterwards), on SIGTERM/SIGHUP/SIGINT/SIGQUIT
+  and around Ctrl-Z; bytes parsed into keys, mouse events and query answers,
+  sequences cut between reads kept until complete.
+* `caps.rs` — the queries sent once: Kitty's (a 1 × 1 image, `a=q`), XTVERSION,
+  the cell size (`CSI 16 t`) and the text area (`CSI 14 t`), the Sixel colour
+  registers, then DA1, which every terminal answers: its reply ends the wait
+  after one round trip, over SSH too (at most 1 s, `NITTY_PROBE_MS`; answers
+  later than that are dropped from the input, not left to the shell). Kitty
+  when it answers OK; iTerm2 when its XTVERSION says so, or when `TERM_PROGRAM`
+  or `LC_TERMINAL` name it outside tmux and screen (SSH forwards
+  `LC_TERMINAL`); Sixel when DA1 lists 4; half blocks otherwise. In tmux the
+  queries reach tmux, which never passes Kitty or iTerm2 images on unasked:
+  only its own Sixel, else half blocks. The Linux console and GNU screen get
+  DA1 only. Colours: 24-bit when `COLORTERM` or XTVERSION says so; otherwise
+  16 for `TERM` `linux`, `vt*` and `ansi`, 256 for Apple's Terminal and GNU
+  screen, 24-bit for the rest.
+* `glance.rs` — the quick look (`-p`, or any output that is not a terminal):
+  a summary line, the views in a row, `--info`, `--legend`; with an image
+  protocol, the rows are printed first and each picture drawn into them, so
+  that the output scrolls with the shell.
+* `app.rs` — the viewer: the image read on a helper thread (`view::Loading`,
+  progress shown), keys read together handled before drawing, pictures
+  computed again only when what they show changes, images sent again only then
+  (each view's encoded sequence kept; with an image protocol the crosshair is
+  marked in the margins, so moving it within a slice resends no picture),
+  frames inside synchronized updates (`CSI ?2026`), 4D volumes decompressed in
+  the background, a panel (metadata, labels counted once per volume, the time
+  course of a voxel).
+* `main.rs` — options, the mode, and the library's sandbox: applied once the
+  terminal is opened and asked, so that its descriptor keeps its ioctls
+  (Landlock decides at open time).
+
 ## Data flow of one preview
 
 1. Sushi constructs the viewer; the window appears immediately with a spinner.
@@ -173,6 +256,11 @@ fixture. It is not installed for users.
 /usr/local/bin/gnome-nifti-preview-thumbnailer                 (the backend; only with --thumbnails or a yes)
 ```
 
+The terminal viewer is installed on its own, by `install.sh --terminal` or
+`get.sh --terminal`: one file, `$XDG_BIN_HOME/nitty` or `~/.local/bin/nitty`
+(`/usr/local/bin/nitty` as root), static on the release archive. Neither
+installation reads or removes the other's files.
+
 **Thumbnails.** GNOME Files (gnome-desktop's thumbnail factory) runs the
 program of a `.thumbnailer` entry for each file in a bubblewrap sandbox that
 mounts `/usr` read-only, a private `/tmp` with the file (named
@@ -193,3 +281,4 @@ user MIME database so that `uninstall.sh` restores the exact previous state.
 ## Decisions
 
 * [ADR 0001 — Rust backend, nibabel as test oracle](decisions/0001-backend-language.md)
+* [ADR 0002 — The terminal viewer](decisions/0002-terminal-viewer.md)

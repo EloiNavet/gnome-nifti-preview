@@ -4,6 +4,12 @@
 #   wget -qO- https://raw.githubusercontent.com/EloiNavet/gnome-nifti-preview/main/get.sh | bash
 #   wget -qO- https://raw.githubusercontent.com/EloiNavet/gnome-nifti-preview/main/get.sh | bash -s -- --uninstall
 #
+# The terminal viewer alone (nitty: no GNOME needed, also as root in a
+# container), and its removal:
+#
+#   wget -qO- https://raw.githubusercontent.com/EloiNavet/gnome-nifti-preview/main/get.sh | bash -s -- --terminal
+#   wget -qO- https://raw.githubusercontent.com/EloiNavet/gnome-nifti-preview/main/get.sh | bash -s -- --terminal --uninstall
+#
 # Downloads the latest release (prebuilt backend, nothing to compile), checks
 # its SHA-256 and installs it in your home folder. If GNOME Sushi — the
 # previewer behind the Space key — is missing, offers to install it first.
@@ -14,6 +20,26 @@ set -euo pipefail
 unset CDPATH
 tmp=""   # download directory, removed on exit
 
+# >>> remove_nitty: the same lines in uninstall.sh and get.sh (compared by
+# tests/install/test_terminal.sh).
+# Remove $1/nitty if it is this terminal viewer: a regular file that answers
+# "nitty <version>" (asked with a time limit, no input, a bounded answer).
+remove_nitty() {
+    local dir="$1" quiet="${2:-0}" said
+    if [ ! -e "$dir/nitty" ] && [ ! -L "$dir/nitty" ]; then
+        ((quiet)) || echo "nitty is not installed in $dir."
+        return 0
+    fi
+    { [ -f "$dir/nitty" ] && [ ! -L "$dir/nitty" ]; } || die "$dir/nitty is not a regular file; leaving it alone."
+    said="$(timeout 5 "$dir/nitty" --version </dev/null 2>/dev/null | head -c 256)" || true
+    case "$said" in
+        "nitty "*) rm -f -- "$dir/nitty" ;;
+        *) die "$dir/nitty is not this terminal viewer; leaving it alone." ;;
+    esac
+    ((quiet)) || echo "Removed $dir/nitty."
+}
+# <<< remove_nitty
+
 main() {
     local default_repo="EloiNavet/gnome-nifti-preview"
     local repo="${GNOME_NIFTI_PREVIEW_REPO:-$default_repo}"
@@ -23,9 +49,20 @@ main() {
     say() { printf '%s\n' "$*"; }
     die() { printf '\nerror: %s\n' "$*" >&2; exit 1; }
 
-    # It installs into your own home folder: sudo would put root-owned files
-    # there (or install for root), and is never needed.
-    if [ "$(id -u)" -eq 0 ] && [ "${GNOME_NIFTI_PREVIEW_ALLOW_ROOT:-}" != 1 ]; then
+    local terminal=0 uninstall=0 a
+    for a in "$@"; do
+        case "$a" in
+            --terminal) terminal=1 ;;
+            --uninstall) uninstall=1 ;;
+            *) die "unknown option: $a (--terminal: the terminal viewer; --uninstall: remove)" ;;
+        esac
+    done
+    ((terminal)) && asset="nitty.tar.gz"
+
+    # The preview installs into your own home folder: sudo would put
+    # root-owned files there (or install for root), and is never needed. The
+    # terminal viewer alone may go to /usr/local/bin as root (containers).
+    if [ "$(id -u)" -eq 0 ] && ((!terminal)) && [ "${GNOME_NIFTI_PREVIEW_ALLOW_ROOT:-}" != 1 ]; then
         die "do not run this with sudo or as root: it installs into your home folder. Run it again as yourself."
     fi
     case "${HOME:-}" in /*) ;; *) die "HOME is not set to an absolute path" ;; esac
@@ -36,7 +73,18 @@ main() {
     local cache="${XDG_CACHE_HOME:-}"
     case "$cache" in /*) ;; *) cache="$HOME/.cache" ;; esac
 
-    if [ "${1:-}" = "--uninstall" ]; then
+    # Where nitty goes, as install.sh chooses it.
+    local bin_dir=/usr/local/bin
+    if [ "$(id -u)" -ne 0 ]; then
+        bin_dir="${XDG_BIN_HOME:-}"
+        case "$bin_dir" in /*) ;; *) bin_dir="$HOME/.local/bin" ;; esac
+    fi
+
+    if ((uninstall && terminal)); then
+        remove_nitty "$bin_dir"
+        return
+    fi
+    if ((uninstall)); then
         if [ -x "$data/gnome-nifti-preview/uninstall.sh" ]; then
             bash "$data/gnome-nifti-preview/uninstall.sh"
         else
@@ -44,7 +92,6 @@ main() {
         fi
         return
     fi
-    [ "$#" -eq 0 ] || die "unknown option: $1 (use --uninstall to remove)"
 
     case "$(uname -m)" in
         x86_64|aarch64) ;;
@@ -52,8 +99,10 @@ main() {
     esac
 
     # ---------------------------------------------------------------- Sushi
-    # Any distribution's Sushi package installs this D-Bus service file.
+    # Any distribution's Sushi package installs this D-Bus service file
+    # (the terminal viewer needs none of GNOME).
     local service="" d dirs=()
+    ((terminal)) && service=1
     IFS=: read -r -a dirs <<<"${GNOME_NIFTI_PREVIEW_SERVICE_DIRS:-${XDG_DATA_DIRS:-/usr/local/share:/usr/share}}"
     for d in "${dirs[@]}"; do
         [ -e "$d/dbus-1/services/org.gnome.NautilusPreviewer.service" ] && service=1
@@ -104,8 +153,14 @@ main() {
             die "neither wget nor curl is installed"
         fi
     }
-    say "Downloading GNOME NIfTI Preview..."
-    fetch "$base/$asset" "$tmp/$asset" || die "download failed: $base/$asset"
+    if ((terminal)); then
+        say "Downloading nitty, the terminal viewer..."
+        fetch "$base/$asset" "$tmp/$asset" || die "download failed: $base/$asset
+       (a release without the terminal viewer? Build it instead: cargo install --locked --git https://github.com/$repo nitty)"
+    else
+        say "Downloading GNOME NIfTI Preview..."
+        fetch "$base/$asset" "$tmp/$asset" || die "download failed: $base/$asset"
+    fi
     fetch "$base/$asset.sha256" "$tmp/$asset.sha256" || die "download failed: $base/$asset.sha256"
     # Compare the archive's own hash (sha256sum -c would check whatever file
     # the .sha256 names).
@@ -118,10 +173,18 @@ main() {
     local dir
     dir="$(find "$tmp" -mindepth 2 -maxdepth 2 -name install.sh -printf '%h\n' -quit)"
     [ -n "$dir" ] || die "unexpected archive layout"
-    if [ ! -e "$dir/bin/$(uname -m)/nifti-preview" ]; then
-        die "this release has no prebuilt backend for $(uname -m) yet; see the README to build it from source."
+    local program=nifti-preview
+    ((terminal)) && program=nitty
+    if [ ! -e "$dir/bin/$(uname -m)/$program" ]; then
+        die "this release has no prebuilt $program for $(uname -m) yet; see the README to build it from source."
     fi
 
+    if ((terminal)); then
+        bash "$dir/install.sh" --terminal < /dev/null
+        say ""
+        say "To remove it later:  wget -qO- https://raw.githubusercontent.com/$default_repo/main/get.sh | bash -s -- --terminal --uninstall"
+        return
+    fi
     bash "$dir/install.sh" --quiet < /dev/null
     say ""
     say "Done. In Files, select a medical image (NIfTI, MGH, MRtrix, NRRD, MetaImage or DICOM) and press Space."

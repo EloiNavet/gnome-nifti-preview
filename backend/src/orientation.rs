@@ -102,6 +102,14 @@ impl ViewPlan {
         g[self.v_axis] = if self.v_flip { self.height - 1 - row } else { row };
         g
     }
+
+    /// Image pixel (col, row) of grid point `g` (inverse of `grid_point`);
+    /// its slice is `g[self.slice_axis]`. `g` must be a point of the grid.
+    pub fn screen_point(&self, g: [usize; 3]) -> (usize, usize) {
+        let (h, v) = (g[self.h_axis], g[self.v_axis]);
+        debug_assert!(h < self.width && v < self.height, "grid point {g:?} outside the view {}x{}", self.width, self.height);
+        (if self.h_flip { self.width - 1 - h } else { h }, if self.v_flip { self.height - 1 - v } else { v })
+    }
 }
 
 /// The grid the views are cut from: the stored voxel grid, or for an oblique
@@ -283,6 +291,19 @@ impl Grid {
             out[c] = (inside(v[c], self.voxel_shape[c])? + 0.5).floor() as usize;
         }
         Some(out)
+    }
+
+    /// The voxel shown at grid point `g` (a point of the grid): itself on
+    /// the stored grid, the nearest one on a resampled grid, None where the
+    /// resampled grid lies outside the image.
+    #[inline(always)]
+    pub fn voxel_at(&self, g: [usize; 3]) -> Option<[usize; 3]> {
+        debug_assert!((0..3).all(|a| g[a] < self.shape[a]), "grid point {g:?} outside the grid {:?}", self.shape);
+        if self.resampled {
+            self.nearest(self.to_voxel(g))
+        } else {
+            Some(g)
+        }
     }
 
     /// Interpolation weights at voxel coordinates `v`, None outside the image.

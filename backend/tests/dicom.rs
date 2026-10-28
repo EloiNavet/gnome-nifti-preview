@@ -464,6 +464,35 @@ fn series_rebuilt_from_the_folder() {
 }
 
 #[test]
+fn a_folder_opens_its_longest_series() {
+    let dir = tmpdir("dicom-folder");
+    for (n, (k, tt)) in [(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)].into_iter().enumerate() {
+        write(&dir, &format!("IM{n:03}"), &slice_file(&Slice::new(k, tt), Ts::ExplicitLe));
+    }
+    let mut other = Slice::new(0, 0);
+    other.series = "9.9.9".into();
+    other.instance = "9.9.9.1".into();
+    write(&dir, "other.dcm", &slice_file(&other, Ts::ExplicitLe));
+    write(&dir, "notes.txt", b"not a DICOM file");
+    let d = dir.clone();
+    within(30, "folder", move || {
+        let mut v = gnome_nifti_preview::view::open_folder(&d, 1 << 30).unwrap();
+        assert_eq!(v.header.shape, vec![COLS, ROWS, 3, 2], "the series of 6 images, not the single one");
+        assert_values(&mut v, 1, 1, 0);
+        // The other series of the folder are listed.
+        let (catalog, current) = gnome_nifti_preview::view::series_catalog(&mut v).unwrap();
+        assert_eq!(catalog.related(current.as_deref()).len(), 2);
+    });
+    // A folder without DICOM images.
+    let empty = tmpdir("dicom-folder-empty");
+    std::fs::write(empty.join("readme.txt"), b"nothing").unwrap();
+    let e = gnome_nifti_preview::view::open_folder(&empty, 1 << 30).err().unwrap();
+    assert_eq!(e.code, "not_found");
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&empty).ok();
+}
+
+#[test]
 fn missing_slices_irregular_spacing_and_tilt() {
     let dir = tmpdir("dicom-gaps");
     // Slices at z = 0, 3, 9 (one missing), the stack sheared in y (tilt).

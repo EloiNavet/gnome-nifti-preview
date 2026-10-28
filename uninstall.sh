@@ -2,10 +2,66 @@
 # GNOME NIfTI Preview — removes everything install.sh put in your home directory,
 # and offers to remove the thumbnail program it copied to /usr/local/bin.
 #   ./uninstall.sh [--no-restart] [--quiet] [--keep-thumbnailer]
+#   ./uninstall.sh --terminal [--bin-dir DIR] [--quiet]
+#     removes the terminal viewer, nitty, from where install.sh --terminal put
+#     it (--bin-dir, else /usr/local/bin as root, else ~/.local/bin), only.
 set -euo pipefail
 unset CDPATH
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+# >>> remove_nitty: the same lines in uninstall.sh and get.sh (compared by
+# tests/install/test_terminal.sh).
+# Remove $1/nitty if it is this terminal viewer: a regular file that answers
+# "nitty <version>" (asked with a time limit, no input, a bounded answer).
+remove_nitty() {
+    local dir="$1" quiet="${2:-0}" said
+    if [ ! -e "$dir/nitty" ] && [ ! -L "$dir/nitty" ]; then
+        ((quiet)) || echo "nitty is not installed in $dir."
+        return 0
+    fi
+    { [ -f "$dir/nitty" ] && [ ! -L "$dir/nitty" ]; } || die "$dir/nitty is not a regular file; leaving it alone."
+    said="$(timeout 5 "$dir/nitty" --version </dev/null 2>/dev/null | head -c 256)" || true
+    case "$said" in
+        "nitty "*) rm -f -- "$dir/nitty" ;;
+        *) die "$dir/nitty is not this terminal viewer; leaving it alone." ;;
+    esac
+    ((quiet)) || echo "Removed $dir/nitty."
+}
+# <<< remove_nitty
+
+# --terminal: remove nitty, and nothing of the GNOME preview (nor the other
+# way round). The folder is chosen as install.sh chose it.
+for a in "$@"; do
+    [ "$a" = --terminal ] || continue
+    dir="" quiet=0
+    while (($#)); do
+        case "$1" in
+            --terminal) shift ;;
+            --bin-dir) dir="${2:?--bin-dir needs a folder}"; shift 2 ;;
+            --quiet) quiet=1; shift ;;
+            -h|--help) sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+            *) echo "unknown option with --terminal: $1" >&2; exit 64 ;;
+        esac
+    done
+    if [ -z "$dir" ]; then
+        if [ "$(id -u)" -eq 0 ]; then
+            dir=/usr/local/bin
+        else
+            dir="${XDG_BIN_HOME:-}"
+            case "$dir" in /*) ;; *)
+                case "${HOME:-}" in /*) ;; *) die "HOME is not set to an absolute path (or give --bin-dir)" ;; esac
+                [ -O "$HOME" ] || die "your home folder $HOME belongs to another user (sudo -E?); run this as yourself, or give --bin-dir."
+                dir="$HOME/.local/bin" ;;
+            esac
+        fi
+    fi
+    case "$dir" in /*) ;; *) die "--bin-dir must be an absolute path" ;; esac
+    while [ "$dir" != / ] && [ "${dir%/}" != "$dir" ]; do dir="${dir%/}"; done
+    remove_nitty "$dir" "$quiet"
+    exit 0
+done
+
 if [ "$(id -u)" -eq 0 ] && [ "${GNOME_NIFTI_PREVIEW_ALLOW_ROOT:-}" != 1 ]; then
     die "do not run this with sudo or as root: GNOME NIfTI Preview is installed in your own home folder."
 fi
@@ -27,7 +83,7 @@ while (($#)); do
         --no-restart) RESTART=0; shift ;;
         --quiet) QUIET=1; shift ;;
         --keep-thumbnailer) KEEP_THUMBNAILER=1; shift ;;
-        -h|--help) sed -n '2,4p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 64 ;;
     esac
 done

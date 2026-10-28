@@ -1,6 +1,6 @@
 [package]
 name = "gnome-nifti-preview"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.85"
 license = "GPL-2.0-or-later"
@@ -16,6 +16,13 @@ path = "src/lib.rs"
 [[bin]]
 name = "nifti-preview"
 path = "src/main.rs"
+
+# The terminal viewer (terminal/) shares the library, the lock file and the
+# release profile; `cargo build` here builds only nifti-preview.
+[workspace]
+members = [".", "terminal"]
+default-members = ["."]
+exclude = ["fuzz"]
 
 [dependencies]
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }

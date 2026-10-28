@@ -23,13 +23,19 @@ fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], payload: &[u8]) {
 }
 
 pub fn encode_rgb(width: usize, height: usize, rgb: &[u8]) -> Vec<u8> {
+    encode_rgb_with(width, height, rgb, 6)
+}
+
+/// `encode_rgb` with zlib compression `level` (0 to 9; 1 is the fastest
+/// that still compresses, for pictures sent at once to a terminal).
+pub fn encode_rgb_with(width: usize, height: usize, rgb: &[u8], level: u32) -> Vec<u8> {
     let stride = width * 3;
     let mut raw = Vec::with_capacity((stride + 1) * height);
     for row in rgb.chunks(stride) {
         raw.push(0);
         raw.extend_from_slice(row);
     }
-    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(level.min(9)));
     z.write_all(&raw).expect("in-memory write");
     let idat = z.finish().expect("in-memory write");
     let mut out = b"\x89PNG\r\n\x1a\n".to_vec();

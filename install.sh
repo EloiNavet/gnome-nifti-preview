@@ -20,25 +20,41 @@
 # If ITK-SNAP (or FSLeyes, MRIcroGL, MRIcron) is installed and no application
 # was chosen for NIfTI files, it becomes their default ("Open With ITK-SNAP" in
 # the preview), unless --no-default-app. Running it again upgrades in place.
+#
+#   ./install.sh --terminal [--binary PATH] [--bin-dir DIR] [--quiet]
+#
+# Installs only the terminal viewer, nitty, in ${XDG_BIN_HOME:-~/.local/bin}
+# (/usr/local/bin as root, for containers), and nothing of the GNOME preview:
+# neither GNOME, gjs nor Sushi is needed. `uninstall.sh --terminal` removes it.
+# As root it installs a prebuilt binary (--binary, or the release archive's)
+# but does not build one.
 set -euo pipefail
 unset CDPATH
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+# The terminal viewer alone (--terminal) may be installed as root, for all.
+TERMINAL=0
+for a in "$@"; do [ "$a" != --terminal ] || TERMINAL=1; done
 # Everything goes into your own home folder: as root (sudo), files would end
 # up owned by root there, or in root's home, and the previewers of every user
 # would be restarted. Test containers set GNOME_NIFTI_PREVIEW_ALLOW_ROOT=1.
-if [ "$(id -u)" -eq 0 ] && [ "${GNOME_NIFTI_PREVIEW_ALLOW_ROOT:-}" != 1 ]; then
+if [ "$(id -u)" -eq 0 ] && ((!TERMINAL)) && [ "${GNOME_NIFTI_PREVIEW_ALLOW_ROOT:-}" != 1 ]; then
     die "do not run this with sudo or as root: it installs into your home folder. Run it again as yourself."
 fi
-case "${HOME:-}" in /*) ;; *) die "HOME is not set to an absolute path" ;; esac
-[ -O "$HOME" ] || die "your home folder $HOME belongs to another user (sudo -E?); run this as yourself."
+# The home folder is checked here for the preview; for nitty, only when its
+# folder is in it (terminal_bin_dir).
+check_home() {
+    case "${HOME:-}" in /*) ;; *) die "HOME is not set to an absolute path${1:-}" ;; esac
+    [ -O "$HOME" ] || die "your home folder $HOME belongs to another user (sudo -E?); run this as yourself${1:-}."
+}
+((TERMINAL)) || check_home
 
 SRC="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
 # XDG paths must be absolute; relative ones are ignored (XDG base directory spec).
 DATA="${XDG_DATA_HOME:-}"
-case "$DATA" in /*) ;; *) DATA="$HOME/.local/share" ;; esac
+case "$DATA" in /*) ;; *) DATA="${HOME:-}/.local/share" ;; esac
 CONFIG="${XDG_CONFIG_HOME:-}"
-case "$CONFIG" in /*) ;; *) CONFIG="$HOME/.config" ;; esac
+case "$CONFIG" in /*) ;; *) CONFIG="${HOME:-}/.config" ;; esac
 APP="$DATA/gnome-nifti-preview"
 MANIFEST="$APP/manifest.txt"
 MIN_RUST="1.85"
@@ -48,23 +64,28 @@ RESTART=1
 QUIET=0
 DEFAULT_APP=1
 
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; }
 THUMBNAILS="${GNOME_NIFTI_PREVIEW_THUMBNAILS:-ask}"   # ask | yes | no (tests: no)
 # The program GNOME's thumbnail sandbox runs, and how it gets there (tests set both).
 THUMB_PROG="${GNOME_NIFTI_PREVIEW_THUMBNAILER:-/usr/local/bin/gnome-nifti-preview-thumbnailer}"
 SUDO="${GNOME_NIFTI_PREVIEW_SUDO-sudo}"
+BIN_DIR=""
+GNOME_OPTIONS=()
 while (($#)); do
     case "$1" in
+        --terminal) shift ;;
+        --bin-dir) BIN_DIR="${2:?--bin-dir needs a folder}"; shift 2 ;;
         --binary) BINARY="${2:?--binary needs a path}"; shift 2 ;;
-        --no-restart) RESTART=0; shift ;;
-        --no-default-app) DEFAULT_APP=0; shift ;;
-        --thumbnails) THUMBNAILS=yes; shift ;;
-        --no-thumbnails) THUMBNAILS=no; shift ;;
+        --no-restart) RESTART=0; GNOME_OPTIONS+=("$1"); shift ;;
+        --no-default-app) DEFAULT_APP=0; GNOME_OPTIONS+=("$1"); shift ;;
+        --thumbnails) THUMBNAILS=yes; GNOME_OPTIONS+=("$1"); shift ;;
+        --no-thumbnails) THUMBNAILS=no; GNOME_OPTIONS+=("$1"); shift ;;
         --quiet) QUIET=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage >&2; exit 64 ;;
     esac
 done
+[ -z "$BIN_DIR" ] || ((TERMINAL)) || die "--bin-dir is an option of --terminal (the folder nitty goes in)"
 
 say() { ((QUIET)) || printf '%s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
@@ -79,6 +100,122 @@ new_tmp() { # directory -> $REPLY, a new temporary file there
 }
 
 version_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]; }
+
+# ------------------------------------------------------------ terminal viewer
+# The folder nitty goes in: --bin-dir, else /usr/local/bin as root, else
+# $XDG_BIN_HOME or ~/.local/bin. uninstall.sh and get.sh choose it alike.
+terminal_bin_dir() {
+    local dir="$BIN_DIR"
+    if [ -z "$dir" ]; then
+        if [ "$(id -u)" -eq 0 ]; then
+            dir=/usr/local/bin
+        else
+            dir="${XDG_BIN_HOME:-}"
+            case "$dir" in /*) ;; *) check_home " (or give --bin-dir)"; dir="$HOME/.local/bin" ;; esac
+        fi
+    fi
+    case "$dir" in /*) ;; *) die "--bin-dir must be an absolute path" ;; esac
+    # One spelling (PATH is compared with it): no slash at the end.
+    while [ "$dir" != / ] && [ "${dir%/}" != "$dir" ]; do dir="${dir%/}"; done
+    printf '%s\n' "$dir"
+}
+
+# As root, nitty is run (--version) then installed for everyone: only a file
+# that no one but root, or the user running sudo, could have written.
+check_root_may_run() {
+    local real dir owner mode
+    real="$(readlink -f -- "$1")"
+    dir="$(dirname -- "$real")"
+    for owner in "$(stat -c %u -- "$real")" "$(stat -c %u -- "$dir")"; do
+        [ "$owner" = 0 ] || [ "$owner" = "${SUDO_UID:-0}" ] ||
+            die "$real or its folder belongs to another user (uid $owner); as root, nitty is installed only from a file of root or of the user running sudo."
+    done
+    mode="$(stat -c %a -- "$real")"
+    ((!(8#$mode & 8#022))) || die "$real can be changed by other users (mode $mode); as root, it is neither run nor installed."
+    mode="$(stat -c %a -- "$dir")"
+    # (In a sticky folder, such as /tmp, others cannot replace a file they do not own.)
+    ((!(8#$mode & 8#022) || (8#$mode & 8#1000))) || die "$dir can be changed by other users (mode $mode); as root, nothing in it is run nor installed."
+}
+
+install_terminal() {
+    ((${#GNOME_OPTIONS[@]} == 0)) || die "${GNOME_OPTIONS[0]} is an option of the GNOME preview, not of --terminal"
+    local dir bin="$BINARY" version
+    dir="$(terminal_bin_dir)"
+    if [ -z "$bin" ] && [ -x "$SRC/bin/$arch/nitty" ]; then
+        bin="$SRC/bin/$arch/nitty"                     # release archive layout
+    fi
+    if [ -z "$bin" ] && [ -f "$SRC/backend/terminal/Cargo.toml" ]; then
+        # As root, the build would leave files of root in the working copy.
+        if [ "$(id -u)" -eq 0 ] && [ "${GNOME_NIFTI_PREVIEW_ALLOW_ROOT:-}" != 1 ]; then
+            die "as root, nitty is not built. Build it as yourself:
+         ./install.sh --terminal              (installs it in ~/.local/bin), or
+         cargo build --release --locked -p nitty   (in backend/), then
+         sudo ./install.sh --terminal --binary backend/target/release/nitty"
+        fi
+        local cargo_cmd rustc_cmd host quiet_flag=""
+        cargo_cmd="$(find_cargo)" || die "no nitty binary. Either install Rust >= $MIN_RUST and run this again
+       (Ubuntu 26.04: sudo apt install cargo build-essential
+        Ubuntu 24.04: sudo apt install cargo-1.85 build-essential),
+       or pass a prebuilt binary with --binary PATH."
+        say "Building nitty with $cargo_cmd ($("$cargo_cmd" --version | awk '{print $2}'))..."
+        rustc_cmd="${RUSTC:-$(command -v "${cargo_cmd/cargo/rustc}" || command -v rustc || true)}"
+        [ -n "$rustc_cmd" ] || die "no rustc next to $cargo_cmd"
+        # This machine's target, given explicitly: the binary is then where
+        # this script looks, whatever a Cargo configuration (build.target) or
+        # CARGO_TARGET_DIR says.
+        host="$("$rustc_cmd" -vV | sed -n 's/^host: //p')"
+        [ -n "$host" ] || die "$rustc_cmd -vV does not name this machine's target"
+        ((QUIET)) && quiet_flag="--quiet"
+        (cd "$SRC/backend" && CARGO_TARGET_DIR="$SRC/backend/target" RUSTC="$rustc_cmd" \
+            "$cargo_cmd" build --release --locked -p nitty --target "$host" $quiet_flag) || die "the build of nitty failed (see the messages above)"
+        bin="$SRC/backend/target/$host/release/nitty"
+    fi
+    [ -n "$bin" ] || die "no nitty binary: pass a prebuilt one with --binary PATH."
+    [ -f "$bin" ] && [ -x "$bin" ] || die "$bin is not an executable file"
+    [ "$(id -u)" -ne 0 ] || check_root_may_run "$bin"
+    mkdir -p -- "$dir"
+    # The copy is what is checked and then moved in place.
+    new_tmp "$dir"
+    cp -- "$bin" "$REPLY"
+    chmod 755 "$REPLY"
+    # Bounded: a few seconds, no input, one short line.
+    version="$(timeout 5 "$REPLY" --version </dev/null 2>/dev/null | head -c 256 | LC_ALL=C tr -cd '[:print:]\n' | head -n 1)" || true
+    case "$version" in
+        "nitty "*) ;;
+        "") die "$bin does not run on this system" ;;
+        *) die "$bin is not nitty (it says: $version)" ;;
+    esac
+    mv -fT -- "$REPLY" "$dir/nitty"
+    say "Installed $dir/nitty ($version)."
+    case ":${PATH:-}:" in
+        *":$dir:"* | *":$dir/:"*) say "Try it:  nitty IMAGE   (or nitty -p IMAGE for a quick look)" ;;
+        *) warn "$dir is not in your PATH; add it, e.g. in ~/.profile:  export PATH=\"$dir:\$PATH\"" ;;
+    esac
+}
+
+arch="$(uname -m)"
+find_cargo() {
+    local c best="" bestv=""
+    for c in cargo $(compgen -c cargo- 2>/dev/null | grep -E '^cargo-1\.[0-9]+$' | sort -uV); do
+        command -v "$c" >/dev/null || continue
+        local v
+        v="$("$c" --version 2>/dev/null | awk '{print $2}')" || continue
+        [ -n "$v" ] || continue
+        if version_ge "$v" "$MIN_RUST" && { [ -z "$bestv" ] || version_ge "$v" "$bestv"; }; then
+            best="$c"; bestv="$v"
+        fi
+    done
+    [ -n "$best" ] && echo "$best"
+}
+
+if ((TERMINAL)); then
+    install_terminal
+    exit 0
+fi
+# The terminal viewer's archive (nitty.tar.gz) holds nothing of the preview.
+if [ ! -d "$SRC/sushi" ] && [ -x "$SRC/bin/$arch/nitty" ]; then
+    die "this is the terminal viewer's archive: install it with  $0 --terminal"
+fi
 
 # ------------------------------------------------------------ requirements
 missing=()
@@ -113,21 +250,6 @@ if [ -n "$sushi_version" ]; then
 fi
 
 # ------------------------------------------------------------ backend binary
-arch="$(uname -m)"
-find_cargo() {
-    local c best="" bestv=""
-    for c in cargo $(compgen -c cargo- 2>/dev/null | grep -E '^cargo-1\.[0-9]+$' | sort -uV); do
-        command -v "$c" >/dev/null || continue
-        local v
-        v="$("$c" --version 2>/dev/null | awk '{print $2}')" || continue
-        [ -n "$v" ] || continue
-        if version_ge "$v" "$MIN_RUST" && { [ -z "$bestv" ] || version_ge "$v" "$bestv"; }; then
-            best="$c"; bestv="$v"
-        fi
-    done
-    [ -n "$best" ] && echo "$best"
-}
-
 if [ -z "$BINARY" ] && [ -x "$SRC/bin/$arch/nifti-preview" ]; then
     BINARY="$SRC/bin/$arch/nifti-preview"        # release tarball layout
 fi

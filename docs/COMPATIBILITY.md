@@ -1,6 +1,6 @@
 # Compatibility
 
-Status as of version 0.1.0. "Tested" means a test was run on that
+Status as of version 0.2.0. "Tested" means a test was run on that
 configuration; the evidence column says which one. The automated GUI tests run
 the real, distribution-packaged GNOME Sushi under Xvfb (X11, no window manager)
 and talk to it over D-Bus exactly like Nautilus does; the real Nautilus 50 was
@@ -67,6 +67,30 @@ cycles leave no backend and no zombie; no JavaScript error is logged.
 | Remote locations without a local path (GVfs without its FUSE bridge) | Unsupported (clear message: install gvfs-fuse, or mount with sshfs or NFS) |
 | Corrupted, truncated, mislabelled files | Tested (7 200 mutated NIfTI files, 1 560 MGH, MRtrix, NRRD and MetaImage ones (text and bzip2 encodings, a header alone included), 600 DICOM ones in the tests and 3 000 more from real samples, never a crash) |
 
+## Terminal viewer (nitty)
+
+What nitty draws with is chosen from the terminal's answers to a few queries
+(see [ARCHITECTURE](ARCHITECTURE.md#terminal-viewer-nitty)); `--protocol` and
+`--colors` override it.
+
+| Terminal | Drawn with | Status | Evidence |
+|---|---|---|---|
+| VTE 0.84 (GNOME Terminal 3.58, Ptyxis 50) | half blocks, 24-bit colour | **Tested by hand** | nitty run in a real VTE widget under Xvfb by a script outside the test suite, keys sent, screen read back and its screenshot checked by eye. This VTE answers DA1 without Sixel, and draws nothing when Sixel is forced |
+| tmux 3.6 | half blocks (tmux answers the queries itself) | **Tested by hand** | `tests/tmux.rs` run in an Ubuntu 26.04 container; the CI job runs it with Ubuntu 24.04's tmux (pending its first run) |
+| A terminal answering like Kitty, like a Sixel terminal, or not at all | Kitty images, Sixel, half blocks | **Tested** (at the protocol level) | `tests/interactive.rs`: a pseudo-terminal plays the terminal |
+| Kitty, Ghostty, WezTerm, iTerm2, Konsole, foot, xterm with Sixel | images (Kitty, iTerm2 or Sixel) | **Expected to work, not tested** in those terminals | the sequences follow each protocol's specification and are checked byte for byte; the Sixel output, decoded by hand with libsixel's `sixel2png`, gives back the slices; Kitty and iTerm2 carry the library's PNG |
+| GNU screen 4.09 | half blocks, 256 colours | Expected to work, not tested | screen gets DA1 only (it would show the other queries) |
+| Linux console | half blocks, 16 colours | Tested (output) | `tests/glance.rs` with `TERM=linux` |
+| Dumb terminal, a pipe, a file | characters by brightness; half blocks in 24-bit colour | Tested | `tests/glance.rs` |
+| Over SSH | as the terminal at the other end | Not tested over a real link | the queries take one round trip (DA1 last); images are sent in the escape codes (`t=d`), never as files the remote terminal could not read |
+
+| Platform | Status | Evidence |
+|---|---|---|
+| Linux x86_64, static binary (musl) | **Tested by hand** | built in an Ubuntu 26.04 container, run in Ubuntu 22.04, 24.04, 26.04 and 26.10 containers; the CI job checks it for no dynamic loader or library (pending its first run) |
+| Linux aarch64, static binary | **Not built yet** | the release workflow builds it on GitHub's ARM runners when a tag is pushed (public repositories); it has never run |
+| Built from source, Rust 1.85 and stable | **Tested** | Clippy and the tests with both, with and without default features (the CI matrix: pending its first run); `install.sh --terminal` from a checkout |
+| macOS, BSD | Unsupported | the sandbox is Linux's (seccomp, Landlock), and the terminal layer was only built and run on Linux |
+
 ## Known limitations
 
 * Sushi 51.0 keeps every unloaded renderer object alive (reproduced with a
@@ -92,3 +116,21 @@ cycles leave no backend and no zombie; no JavaScript error is logged.
   descriptions (slice, cursor, value under the pointer), and the keyboard can
   choose the view to scroll (V, Page Up/Down). Orca has not been tested, and
   moving the cursor within a slice needs the pointer.
+* nitty over SSH: `COLORTERM` is not forwarded by default, so 24-bit colour is
+  assumed unless `TERM` says otherwise (`linux`, `screen`, `vt*`); an older
+  terminal (macOS Terminal before 26) wants `--colors 256` or
+  `NITTY_COLORS=256`.
+* nitty in tmux: Kitty and iTerm2 images only with `--protocol` and tmux's
+  `set -g allow-passthrough on`, and they are not redrawn by tmux (switching
+  windows loses them until the next frame, Ctrl-L); Sixel needs tmux 3.4 or
+  later built with it. Kitty's Unicode placeholders are not used.
+* nitty takes the mouse to place the cursor: most terminals select text with
+  Shift held, or `--no-mouse` leaves the mouse to the terminal.
+* In nitty, moving the cursor changes a slice of another view, which is drawn
+  again. On a 200 × 60 terminal (a 1 mm T1, a 512² CT): 25 to 60 kB per key in
+  half blocks; with images, that view alone, 250 to 370 kB (Kitty, iTerm2) or
+  400 to 790 kB (Sixel). Over a slow link, `--protocol blocks` sends least.
+* `nitty -p` in a terminal first asks it what it can show (up to 1 s when it
+  does not answer): keys typed meanwhile are lost, since they cannot be given
+  back to the shell. `--protocol blocks` (or `ascii`) with `--colors`, or
+  `NITTY_PROTOCOL` and `NITTY_COLORS`, skip the question.

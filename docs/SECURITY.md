@@ -70,6 +70,28 @@ missing; the socket filter, the memory cap and no new privileges remain.
 `NIFTI_PREVIEW_DEBUG=1` prints what was applied, and the `hello` line of the
 protocol reports it.
 
+**Terminal viewer** (nitty):
+- It applies the same sandbox (memory cap, no new privileges, no sockets,
+  Landlock read-only) once it has opened the terminal and asked what it can
+  show, before it reads any image. The terminal's descriptor, opened before,
+  keeps its ioctls; signals come through a pipe, not a socket. It writes no
+  file: output goes to the terminal or standard output only.
+- Every character it writes passes one filter that drops C0 and C1 control
+  characters, DEL and bidirectional overrides: a file name, a header field
+  (`descrip`, DICOM tags, NRRD fields), a label name of a user table or a
+  terminal's own answer cannot send an escape sequence (set the clipboard, the
+  title, move the cursor).
+- What the terminal answers is parsed with bounds (an endless sequence is
+  dropped after 4 KiB); the parser is fuzzed (`fuzz/fuzz_targets/terminal.rs`,
+  also a CI job).
+- Images are sent in the escape codes; nitty never asks a terminal to read a
+  file (Kitty's `t=f`).
+- The terminal settings are put back on every exit nitty can see: a normal
+  one, a panic of its own thread, SIGTERM, SIGHUP, SIGINT, SIGQUIT, and around
+  Ctrl-Z. A panic the library catches on another thread leaves the terminal
+  alone (the viewer goes on). After SIGKILL nothing can run: `reset` restores
+  the terminal.
+
 **Previewer side** (GJS):
 - A reply line longer than 8 MiB, a slice larger than the slice limits, a
   spectrum inconsistent with its length, an unexpected id or malformed JSON
@@ -85,8 +107,16 @@ sandbox above before it reads the file, with a lower memory cap (1 GB of voxel
 data) and a limit on the compressed data it inflates (`[thumbnails] max-file-mb`).
 
 **Installers**:
-- `get.sh`, `install.sh` and `uninstall.sh` refuse to run as root. They only
-  write inside your home folder, atomically, with one exception that asks first:
+- `get.sh`, `install.sh` and `uninstall.sh` refuse to run as root, except to
+  install or remove the terminal viewer alone (`--terminal`, for containers),
+  which writes only `nitty` in its folder (`~/.local/bin`, `--bin-dir`, or
+  `/usr/local/bin` as root). As root, `install.sh --terminal` builds nothing
+  and installs only a file that nobody but root or the user running sudo could
+  have changed. `nitty --version` is asked with a time limit, no input and a
+  bounded answer; `uninstall.sh --terminal` removes `nitty` only when it is a
+  regular file that answers `nitty <version>`.
+- For the GNOME preview they only write inside your home folder, atomically,
+  with one exception that asks first:
   for thumbnails, `install.sh` copies the backend to
   `/usr/local/bin/gnome-nifti-preview-thumbnailer` with `sudo` (GNOME's sandbox
   cannot run programs from home folders). It copies again only when the backend
@@ -121,7 +151,7 @@ data) and a limit on the compressed data it inflates (`[thumbnails] max-file-mb`
 ## Checking a download
 
 ```sh
-sha256sum -c gnome-nifti-preview.tar.gz.sha256
+sha256sum -c gnome-nifti-preview.tar.gz.sha256     # or nitty.tar.gz.sha256
 # public repository: also check where and how it was built
 gh attestation verify gnome-nifti-preview.tar.gz --repo EloiNavet/gnome-nifti-preview
 ```

@@ -57,6 +57,85 @@ jobs:
           name: nifti-preview-x86_64
           path: backend/target/release/nifti-preview
 
+  terminal:
+    name: Terminal viewer nitty (stable + MSRV 1.85)
+    runs-on: ubuntu-24.04
+    strategy:
+      # One toolchain failing does not hide what the other says.
+      fail-fast: false
+      matrix:
+        toolchain: [stable, "1.85"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Install toolchain
+        run: |
+          rustup toolchain install ${{ matrix.toolchain }} --profile minimal --component clippy
+          rustup default ${{ matrix.toolchain }}
+      - name: tmux (a test runs nitty in it)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends tmux
+      - name: Clippy
+        working-directory: backend
+        run: |
+          cargo clippy -p nitty --all-targets --locked -- -D warnings
+          cargo clippy -p nitty --all-targets --locked --no-default-features -- -D warnings
+      - name: Test (debug; pseudo-terminal and tmux tests included)
+        working-directory: backend
+        env:
+          NITTY_REQUIRE_TMUX: 1
+          NITTY_REQUIRE_PTY: 1
+          NITTY_REQUIRE_SANDBOX: 1
+        run: |
+          cargo test -p nitty --locked
+          cargo test -p nitty --locked --no-default-features
+      - name: Test (release, as shipped)
+        working-directory: backend
+        env:
+          NITTY_REQUIRE_TMUX: 1
+          NITTY_REQUIRE_PTY: 1
+          NITTY_REQUIRE_SANDBOX: 1
+        run: cargo test -p nitty --release --locked
+
+  # The binary the installer tests use, apart from the tests above: a test
+  # of nitty failing does not stop the GNOME checks.
+  terminal-static:
+    name: Terminal viewer nitty, static build (musl)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Install toolchain and musl-gcc (the C decoders)
+        run: |
+          rustup toolchain install stable --profile minimal --target x86_64-unknown-linux-musl
+          rustup default stable
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends musl-tools
+      - name: Static build (musl)
+        working-directory: backend
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: |
+          cargo build -p nitty --release --locked --target x86_64-unknown-linux-musl
+          bin=target/x86_64-unknown-linux-musl/release/nitty
+          # (Kept whole: readelf | grep -q can fail on a match under pipefail.)
+          elf="$(readelf -l -d "$bin")"
+          if grep -q -e INTERP -e NEEDED <<<"$elf"; then
+            echo "::error::nitty is not statically linked"; exit 1
+          fi
+          ls -l "$bin"
+      - name: The static binary runs on Ubuntu 22.04
+        run: |
+          docker run --rm -v "$PWD/backend/target/x86_64-unknown-linux-musl/release:/n:ro" ubuntu:22.04 \
+            sh -c '/n/nitty --version || exit 1; /n/nitty -p --width 40 /n/nitty; test $? -eq 2'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nitty-x86_64-linux-musl
+          path: backend/target/x86_64-unknown-linux-musl/release/nitty
+
   supply-chain:
     name: Dependencies (cargo deny) and shell scripts (shellcheck)
     runs-on: ubuntu-24.04
@@ -74,7 +153,7 @@ jobs:
         run: git ls-files -z '*.sh' | xargs -0 shellcheck -x -S warning
 
   fuzz:
-    name: Fuzz the file reader and the decoders (2 + 1 minutes)
+    name: Fuzz the file reader, the decoders and nitty's input and encoders (2 + 1 + 1 minutes)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -89,7 +168,7 @@ jobs:
         working-directory: backend
         run: |
           # The prebuilt cargo-fuzz is a musl binary: name the target explicitly.
-          for run in "open_load_render 120" "decoders 60"; do
+          for run in "open_load_render 120" "decoders 60" "terminal 60"; do
             read -r target seconds <<< "$run"
             if ! cargo +nightly fuzz run --target x86_64-unknown-linux-gnu "$target" /tmp/corpus -- -max_total_time="$seconds" -rss_limit_mb=4096 -timeout=20 > /tmp/fuzz.log 2>&1; then
               tail -n 80 /tmp/fuzz.log
@@ -135,7 +214,7 @@ jobs:
 
   desktop-headless:
     name: GJS client, Sushi registry, MIME, install
-    needs: backend
+    needs: [backend, terminal-static]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -145,7 +224,11 @@ jobs:
         with:
           name: nifti-preview-x86_64
           path: bin
-      - run: chmod +x bin/nifti-preview
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: nitty-x86_64-linux-musl
+          path: bin
+      - run: chmod +x bin/nifti-preview bin/nitty
       - name: System packages
         run: |
           sudo apt-get update -q
@@ -153,8 +236,8 @@ jobs:
             xdg-utils libglib2.0-bin desktop-file-utils python3-nibabel python3-numpy gir1.2-adw-1 gir1.2-gtk-4.0
       - name: Fixtures
         run: PYTHONPATH=reference/src python3 -m nifti_preview_ref.cli make-fixtures /tmp/fixtures
-      - name: GJS client and view state against the backend
-        run: NIFTI_PREVIEW_BACKEND=$PWD/bin/nifti-preview gjs tests/gjs/test_client.js /tmp/fixtures
+      - name: GJS client and view state against the backend (and nitty's panel against the viewer's)
+        run: NIFTI_PREVIEW_BACKEND=$PWD/bin/nifti-preview NITTY_BIN=$PWD/bin/nitty gjs tests/gjs/test_client.js /tmp/fixtures
       - name: Preferences window (GTK 4, libadwaita)
         run: xvfb-run -a gjs tests/gjs/test_preferences.js
       - name: Routing inside the real Sushi 46 renderer registry
@@ -169,6 +252,8 @@ jobs:
         run: tests/install/test_install.sh bin/nifti-preview
       - name: One-command install (get.sh) from a local release
         run: tests/install/test_get.sh bin/nifti-preview
+      - name: The terminal viewer alone (install.sh, uninstall.sh, get.sh --terminal)
+        run: tests/install/test_terminal.sh bin/nitty bin/nifti-preview
 
   sushi:
     name: Real Sushi under Xvfb (${{ matrix.name }})
