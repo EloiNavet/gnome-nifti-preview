@@ -65,6 +65,8 @@ fn dtype(t: &str) -> Result<DType> {
 #[derive(Debug)]
 struct Zlib {
     path: PathBuf,
+    /// The folder a detached file must stay in.
+    root: Option<PathBuf>,
     offset: u64,
     bytes: u64,
     compressed: u64,
@@ -75,7 +77,7 @@ impl Decode for Zlib {
         if self.bytes > max_bytes {
             return Err(crate::source::too_large("voxel data", self.bytes, max_bytes));
         }
-        let file = crate::source::open_data_file(&self.path)?;
+        let file = crate::source::open_data_file_in(&self.path, self.root.as_deref())?;
         crate::progress::expect(self.compressed, false);
         let reader = std::io::BufReader::new(crate::source::At { file: &file, pos: self.offset });
         // Grown as the data arrive: a short stream allocates little.
@@ -184,12 +186,13 @@ pub fn parse(text: &[u8], data_start: u64, path: &Path, file_size: u64) -> Resul
     let header_size: i64 = get("HeaderSize").and_then(|v| v.parse().ok()).unwrap_or(0);
     let compressed = yes("CompressedData");
     let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
-    let (data_path, start) = if spec.eq_ignore_ascii_case("LOCAL") {
-        (path.to_path_buf(), data_start)
+    let (data_path, root, start) = if spec.eq_ignore_ascii_case("LOCAL") {
+        (path.to_path_buf(), None, data_start)
     } else if spec.starts_with("LIST") || spec.split_whitespace().count() > 1 {
         bail!("unsupported_format", "MetaImage data in several files are not supported");
     } else {
-        (crate::image::data_file_in(&dir, spec, "MetaImage")?, 0)
+        let (data_path, root) = crate::image::data_file_in(&dir, spec, "MetaImage")?;
+        (data_path, Some(root), 0)
     };
     let local = data_path == path;
     if compressed {
@@ -199,7 +202,7 @@ pub fn parse(text: &[u8], data_start: u64, path: &Path, file_size: u64) -> Resul
         let offset = start + header_size.max(0) as u64;
         let size = if local { file_size } else { std::fs::metadata(&data_path).map(|m| m.len()).unwrap_or(0) };
         let compressed_size = get("CompressedDataSize").and_then(|v| v.parse().ok()).unwrap_or(size.saturating_sub(offset));
-        layout.decoder = Some(Decoder(std::sync::Arc::new(Zlib { path: data_path.clone(), offset, bytes: total, compressed: compressed_size })));
+        layout.decoder = Some(Decoder(std::sync::Arc::new(Zlib { path: data_path.clone(), root, offset, bytes: total, compressed: compressed_size })));
     } else if local {
         if header_size == -1 {
             layout.from_end = true;
@@ -208,7 +211,7 @@ pub fn parse(text: &[u8], data_start: u64, path: &Path, file_size: u64) -> Resul
             layout.offset = start + header_size.max(0) as u64;
         }
     } else {
-        layout.files = vec![DataFile { path: data_path.clone(), line_skip: 0, byte_skip: header_size }];
+        layout.files = vec![DataFile { path: data_path.clone(), root, line_skip: 0, byte_skip: header_size }];
     }
 
     let mut fields = Vec::new();

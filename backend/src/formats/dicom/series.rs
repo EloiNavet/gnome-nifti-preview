@@ -26,6 +26,11 @@ pub struct FrameGeo {
     /// The volume the frame belongs to, when the file says it (dimension
     /// indices of enhanced images, segment numbers).
     pub key: Option<Vec<i64>>,
+    /// What each value of `key` is (TemporalPositionIndex for a time point,
+    /// an echo time pointer for an echo...).
+    pub key_dims: Option<std::sync::Arc<[tags::Tag]>>,
+    /// Echo number and echo time of a classic image (0 when absent).
+    pub echo: [f64; 2],
     /// Order among the frames at the same position, when no key is given.
     pub order: [f64; 6],
     pub rescale: (f64, f64),
@@ -55,6 +60,41 @@ pub fn window_of(set: &DataSet, float: bool) -> Option<(f64, f64)> {
         return (w > 0.0).then(|| (c - w / 2.0, c + w / 2.0));
     }
     (w >= 1.0).then(|| (c - 0.5 - (w - 1.0) / 2.0, c - 0.5 + (w - 1.0) / 2.0))
+}
+
+/// A VOI LUT given in place of a window (PS3.3 C.11.2.1.1).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VoiLut {
+    /// A straight line from the lowest output to the highest: this window,
+    /// exactly (the first value mapped to black, the last to white).
+    Window(f64, f64),
+    /// Another curve, which is not applied.
+    Curve,
+}
+
+/// The first VOI LUT of a data set, if it has one.
+pub fn voi_lut_of(set: &DataSet) -> Option<VoiLut> {
+    let item = set.item(tags::VOI_LUT_SEQUENCE)?;
+    let Some(lut) = super::pixels::Lut::read(item, tags::LUT_DESCRIPTOR, tags::LUT_DATA) else { return Some(VoiLut::Curve) };
+    let n = lut.values.len();
+    let top = ((1u32 << lut.bits.min(16)) - 1) as f64;
+    // Within one output step of the line from 0 to the top (the entries are
+    // rounded to integers).
+    let straight = n > 1
+        && lut.values.iter().enumerate().all(|(i, &v)| (v as f64 - top * i as f64 / (n - 1) as f64).abs() <= 1.0)
+        && lut.values[0] == 0
+        && lut.values[n - 1] as f64 == top;
+    Some(if straight { VoiLut::Window(lut.first as f64, (lut.first + n as i64 - 1) as f64) } else { VoiLut::Curve })
+}
+
+/// Whether the window of `frame` has the SIGMOID function (the window shown
+/// is linear).
+pub fn sigmoid(set: &DataSet, frame: usize) -> bool {
+    let is_sigmoid = |s: &DataSet| s.text(tags::VOI_LUT_FUNCTION).as_deref() == Some("SIGMOID");
+    let group = |s: &DataSet| s.item(tags::FRAME_VOI_LUT_SEQUENCE).is_some_and(is_sigmoid);
+    is_sigmoid(set)
+        || set.items(tags::PER_FRAME_FUNCTIONAL_GROUPS).get(frame).is_some_and(|i| group(&i.set))
+        || set.item(tags::SHARED_FUNCTIONAL_GROUPS).is_some_and(group)
 }
 
 fn vec3(v: &[f64]) -> Option<[f64; 3]> {
@@ -218,6 +258,8 @@ pub fn frames_of(set: &DataSet, desc: &PixelDesc, source: usize) -> Vec<FrameGeo
         spacing: spacing(set),
         thickness: thickness(set),
         key: None,
+        key_dims: None,
+        echo: [set.number(tags::ECHO_NUMBERS).unwrap_or(0.0), set.number(tags::ECHO_TIME).unwrap_or(0.0)],
         order: order_of(set),
         rescale: file_rescale,
         window: window_of(set, desc.float),
@@ -263,6 +305,9 @@ fn enhanced(set: &DataSet, desc: &PixelDesc, source: usize, base: FrameGeo) -> V
         .map(|i| i.set.attribute_tags(tags::DIMENSION_INDEX_POINTER).first().copied().unwrap_or(0))
         .collect();
     let spatial = |t: tags::Tag| matches!(t, tags::IN_STACK_POSITION | tags::IMAGE_POSITION | tags::SLICE_LOCATION);
+    let volume_dims: std::sync::Arc<[tags::Tag]> = pointers.iter().copied().filter(|&p| !spatial(p)).collect();
+    let temporal: std::sync::Arc<[tags::Tag]> = std::sync::Arc::new([tags::TEMPORAL_POSITION_INDEX]);
+    let segment: std::sync::Arc<[tags::Tag]> = std::sync::Arc::new([tags::REFERENCED_SEGMENT_NUMBER]);
     (0..desc.frames)
         .map(|k| {
             let own = per_frame.get(k).map(|i| &i.set);
@@ -273,14 +318,18 @@ fn enhanced(set: &DataSet, desc: &PixelDesc, source: usize, base: FrameGeo) -> V
             let key = content.and_then(|c| {
                 let values = c.numbers(tags::DIMENSION_INDEX_VALUES);
                 if !pointers.is_empty() && values.len() == pointers.len() {
-                    Some(values.iter().zip(&pointers).filter(|(_, &p)| !spatial(p)).map(|(v, _)| *v as i64).collect())
+                    let key = values.iter().zip(&pointers).filter(|(_, &p)| !spatial(p)).map(|(v, _)| *v as i64).collect();
+                    Some((key, volume_dims.clone()))
                 } else {
-                    c.int(tags::TEMPORAL_POSITION_INDEX).map(|t| vec![t])
+                    c.int(tags::TEMPORAL_POSITION_INDEX).map(|t| (vec![t], temporal.clone()))
                 }
             });
             let key = key.or_else(|| {
-                group(tags::SEGMENT_IDENTIFICATION_SEQUENCE).and_then(|s| s.int(tags::REFERENCED_SEGMENT_NUMBER)).map(|s| vec![s])
+                group(tags::SEGMENT_IDENTIFICATION_SEQUENCE)
+                    .and_then(|s| s.int(tags::REFERENCED_SEGMENT_NUMBER))
+                    .map(|s| (vec![s], segment.clone()))
             });
+            let (key, key_dims) = key.map_or((None, None), |(k, d)| (Some(k), Some(d)));
             FrameGeo {
                 source,
                 frame: k,
@@ -292,6 +341,8 @@ fn enhanced(set: &DataSet, desc: &PixelDesc, source: usize, base: FrameGeo) -> V
                 spacing: measures.and_then(spacing).or(base.spacing),
                 thickness: measures.and_then(thickness).or(base.thickness),
                 key,
+                key_dims,
+                echo: base.echo,
                 order: [k as f64, 0.0, 0.0, 0.0, 0.0, 0.0],
                 rescale: group(tags::PIXEL_VALUE_TRANSFORMATION_SEQUENCE).and_then(rescale_of).unwrap_or(base.rescale),
                 window: group(tags::FRAME_VOI_LUT_SEQUENCE).and_then(|g| window_of(g, desc.float)).or(base.window),
@@ -339,7 +390,64 @@ pub struct Assembly {
     pub affine: Mat4,
     pub oriented: bool,
     pub zooms: [f64; 3],
+    /// The volumes are time points: k × TR gives their times. False when
+    /// they are (also) echoes, segments or another dimension.
+    pub timed: bool,
     pub warnings: Vec<String>,
+}
+
+/// What a dimension of the volumes counts, in a warning.
+fn dimension_name(t: Option<tags::Tag>) -> String {
+    match t {
+        Some(tags::TEMPORAL_POSITION_INDEX) => "time points".into(),
+        Some(tags::EFFECTIVE_ECHO_TIME | tags::ECHO_TIME | tags::ECHO_NUMBERS) => "echoes".into(),
+        Some(tags::STACK_ID) => "stacks".into(),
+        Some(tags::DIFFUSION_B_VALUE) => "b-values".into(),
+        Some(t) => format!("values of ({:04X},{:04X})", t >> 16, t & 0xFFFF),
+        None => "values".into(),
+    }
+}
+
+/// Whether the volumes are time points, and if not, a warning that says
+/// what tells them apart. Echoes of one time point are not k × TR apart:
+/// those volumes get no times rather than wrong ones.
+fn volume_meaning(frames: &[FrameGeo], keyed: bool, nt: usize) -> (bool, Option<String>) {
+    if nt <= 1 {
+        return (true, None);
+    }
+    let distinct = |mut v: Vec<u64>| {
+        v.sort_unstable();
+        v.dedup();
+        v.len()
+    };
+    if keyed {
+        let dims = frames[0].key_dims.clone();
+        let len = frames[0].key.as_ref().map_or(0, Vec::len);
+        let varying: Vec<(Option<tags::Tag>, usize)> = (0..len)
+            .map(|c| {
+                let values = frames.iter().filter_map(|f| f.key.as_ref()?.get(c).map(|&v| v as u64)).collect();
+                (dims.as_ref().and_then(|d| d.get(c)).copied(), distinct(values))
+            })
+            .filter(|&(_, n)| n > 1)
+            .collect();
+        if varying.iter().all(|&(t, _)| t == Some(tags::TEMPORAL_POSITION_INDEX)) {
+            return (true, None);
+        }
+        // Segments of a segmentation have no times and need no warning.
+        if varying.iter().all(|&(t, _)| t == Some(tags::REFERENCED_SEGMENT_NUMBER)) {
+            return (false, None);
+        }
+        let parts: Vec<String> = varying.iter().map(|&(t, n)| format!("{n} {}", dimension_name(t))).collect();
+        // "4 time points × 2 echoes" when every combination is a volume.
+        let product = varying.iter().map(|&(_, n)| n).product::<usize>() == nt;
+        let what = if product { format!("are {}", parts.join(" × ")) } else { format!("differ in {}", parts.join(" and ")) };
+        return (false, Some(format!("The {nt} volumes {what}: they are shown without times, and a time course mixes them.")));
+    }
+    let echoes = distinct(frames.iter().map(|f| f.echo[0].to_bits() ^ f.echo[1].to_bits().rotate_left(1)).collect());
+    if echoes <= 1 {
+        return (true, None);
+    }
+    (false, Some(format!("The {nt} volumes hold {echoes} echoes: they are shown without times, and a time course mixes them.")))
 }
 
 pub fn assemble(frames: &[FrameGeo]) -> Assembly {
@@ -362,6 +470,7 @@ pub fn assemble(frames: &[FrameGeo]) -> Assembly {
             affine,
             oriented: false,
             zooms: [dc, dr, dz],
+            timed: true,
             warnings,
         };
     }
@@ -409,6 +518,8 @@ pub fn assemble(frames: &[FrameGeo]) -> Assembly {
         }
         (nt, slots)
     };
+    let (timed, meaning) = volume_meaning(frames, keyed, nt);
+    warnings.extend(meaning);
     let empty = slots.iter().filter(|s| s.is_none()).count();
     if empty > 0 {
         warnings.push(format!("{empty} of {} slices are missing from the series (shown black).", slots.len()));
@@ -447,7 +558,7 @@ pub fn assemble(frames: &[FrameGeo]) -> Assembly {
         affine[a][3] = s * p0[a];
     }
     affine[3][3] = 1.0;
-    Assembly { nz, nt, slots, affine, oriented: true, zooms: [dc, dr, if dz > 0.0 { dz } else { 1.0 }], warnings }
+    Assembly { nz, nt, slots, affine, oriented: true, zooms: [dc, dr, if dz > 0.0 { dz } else { 1.0 }], timed, warnings }
 }
 
 #[cfg(test)]
@@ -464,6 +575,8 @@ mod tests {
             spacing: Some([0.5, 0.25]),
             thickness: Some(2.0),
             key: None,
+            key_dims: None,
+            echo: [0.0; 2],
             order: [order, 0.0, 0.0, 0.0, 0.0, 0.0],
             rescale: (1.0, 0.0),
             window: None,

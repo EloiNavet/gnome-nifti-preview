@@ -18,10 +18,58 @@ OUT="$(mkdir -p "${2:?output dir}" && cd "$2" && pwd)"
 BIN="${3:-$ROOT/backend/target/release/nifti-preview}"
 
 . "$ROOT/tests/lib/home.sh"
+# Windows go to this test's Xvfb, never to the developer's Wayland desktop.
+unset WAYLAND_DISPLAY
+export GDK_BACKEND=x11
 XVFB=""
 SANDBOX="$(mktemp -d)" || exit 1
-trap '[ -z "$XVFB" ] || kill "$XVFB" 2>/dev/null; rm -rf -- "$SANDBOX"' EXIT
+
+# The processes of this test: the D-Bus session starts services (GVfs, the
+# document portal, a keyring...) that can outlive it, some in a session of
+# their own, but all of them have this test's HOME.
+sandbox_pids() {
+    local p v env
+    for p in /proc/[0-9]*; do
+        [ "${p#/proc/}" != "$$" ] || continue
+        { mapfile -d '' -t env <"$p/environ"; } 2>/dev/null || continue
+        for v in "${env[@]}"; do
+            if [ "$v" = "HOME=$SANDBOX" ]; then echo "${p#/proc/}"; break; fi
+        done
+    done
+}
+# Stop them (they write into HOME and mount FUSE file systems in
+# XDG_RUNTIME_DIR, run/doc and run/gvfs), unmount what they left, then remove
+# HOME. The exit status stays the one of the checks.
+cleanup() {
+    local status=$? pids m
+    set +e
+    trap - ERR
+    [ -z "$XVFB" ] || kill "$XVFB" 2>/dev/null
+    pids="$(sandbox_pids)"
+    if [ -n "$pids" ]; then
+        # shellcheck disable=SC2086 # one PID per word
+        kill $pids 2>/dev/null
+        for _ in $(seq 30); do [ -n "$(sandbox_pids)" ] || break; sleep 0.1; done
+        pids="$(sandbox_pids)"
+        # shellcheck disable=SC2086
+        [ -z "$pids" ] || kill -KILL $pids 2>/dev/null
+    fi
+    for m in $(findmnt -rn -o TARGET 2>/dev/null | grep -F "$SANDBOX/"); do
+        fusermount3 -u -z "$m" 2>/dev/null || fusermount -u -z "$m" 2>/dev/null || umount -l "$m" 2>/dev/null
+    done
+    if ! rm -rf -- "$SANDBOX" 2>/dev/null; then
+        sleep 1
+        if ! rm -rf -- "$SANDBOX"; then
+            echo "warning: $SANDBOX could not be removed"
+            [ -z "${GITHUB_ACTIONS:-}" ] || echo "::warning::$SANDBOX could not be removed"
+        fi
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
 use_home "$SANDBOX"
+# Temporary files of the session's services stay in the throw-away HOME.
+export TMPDIR="$HOME/tmp"; mkdir "$TMPDIR"
 export XDG_RUNTIME_DIR="$HOME/run"; mkdir -m 700 "$XDG_RUNTIME_DIR"
 export XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 export GSK_RENDERER=cairo LIBGL_ALWAYS_SOFTWARE=1 NO_AT_BRIDGE=1 GTK_A11Y=none

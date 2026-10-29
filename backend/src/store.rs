@@ -573,7 +573,7 @@ fn read_detached(layout: &DataLayout, stored: usize) -> Result<Vec<u8>> {
         if out.len() >= stored {
             break;
         }
-        let file = source::open_data_file(&f.path)?;
+        let file = source::open_data_file_in(&f.path, f.root.as_deref())?;
         let size = file.metadata().map_err(source::io_error)?.len();
         // Lines to skip (before any decompression), at most 1 MiB of them.
         let mut pos = 0u64;

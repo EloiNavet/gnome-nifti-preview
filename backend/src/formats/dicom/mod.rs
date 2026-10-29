@@ -557,20 +557,31 @@ fn build(members: Vec<(PathBuf, Parsed)>, clicked: Option<usize>, cat: Option<Ar
     let tile_dims = |s: &Source| s.mosaic.map_or((s.desc.rows, s.desc.cols), |m| (m.rows, m.cols));
     let dims = tile_dims(ref_source);
     let colour = ref_source.desc.is_colour();
-    // Frames that do not fit the reference (another size, colour, or
-    // orientation) are left out.
+    // Frames that do not fit the reference (another size, colour, pixel
+    // spacing or orientation) are left out: one affine places them all.
     let same_orientation = |f: &FrameGeo| match (f.orientation, ref_frame.orientation) {
         (Some(a), Some(b)) => a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 1e-3),
+        (None, None) => true,
+        _ => false,
+    };
+    // Spacings written with fewer digits (0.4688 for 0.46875) are the same.
+    let same_spacing = |f: &FrameGeo| match (f.spacing, ref_frame.spacing) {
+        (Some(a), Some(b)) => a.iter().zip(&b).all(|(x, y)| (x - y).abs() <= 1e-3 * x.abs().max(y.abs())),
         (None, None) => true,
         _ => false,
     };
     let before = frames.len();
     let kept: Vec<FrameGeo> = frames
         .into_iter()
-        .filter(|f| tile_dims(&sources[f.source]) == dims && sources[f.source].desc.is_colour() == colour && same_orientation(f))
+        .filter(|f| {
+            tile_dims(&sources[f.source]) == dims && sources[f.source].desc.is_colour() == colour && same_orientation(f) && same_spacing(f)
+        })
         .collect();
     if kept.len() < before {
-        warnings.push(format!("{} images of the series have another size or orientation and are not shown.", before - kept.len()));
+        warnings.push(format!(
+            "{} images of the series have another size, pixel spacing or orientation and are not shown.",
+            before - kept.len()
+        ));
     }
     let asm = series::assemble(&kept);
     warnings.extend(asm.warnings.iter().cloned());
@@ -585,7 +596,8 @@ fn build(members: Vec<(PathBuf, Parsed)>, clicked: Option<usize>, cat: Option<Ar
     } else if uniform_type && uniform_rescale {
         (dtypes[0], false)
     } else if dtypes[0] == DType::F64 && uniform_type {
-        (DType::F64, false)
+        // Double floats keep their precision, rescaled image by image.
+        (DType::F64, true)
     } else {
         (DType::F32, true)
     };
@@ -625,7 +637,8 @@ fn build(members: Vec<(PathBuf, Parsed)>, clicked: Option<usize>, cat: Option<Ar
         } else {
             ref_set.number(tags::FRAME_TIME)
         };
-        repetition_time = tr.filter(|t| *t > 0.0).map(|t| t / 1000.0);
+        // Echoes or other dimensions mixed with the time points: no times.
+        repetition_time = tr.filter(|t| *t > 0.0 && asm.timed).map(|t| t / 1000.0);
         zooms.push(repetition_time.unwrap_or(1.0));
     }
     let ref_desc = ref_source.desc.clone();
@@ -637,9 +650,24 @@ fn build(members: Vec<(PathBuf, Parsed)>, clicked: Option<usize>, cat: Option<Ar
     let fields = fields(ref_set, syntax, &ref_desc, members.len(), &shape);
     let patient = patient_fields(ref_set);
     let intent_code = if ref_set.text(tags::MODALITY).as_deref() == Some("SEG") { 1002 } else { 0 };
+    // A VOI LUT instead of a window: a straight line is that window; another
+    // curve is not applied, and the window is computed from the image.
+    let mut window = if colour { None } else { ref_frame.window };
+    if window.is_none() && !colour {
+        match series::voi_lut_of(ref_set) {
+            Some(series::VoiLut::Window(low, high)) => window = Some((low, high)),
+            Some(series::VoiLut::Curve) => warnings.push(
+                "The file's VOI LUT is a curve, which is not applied: the window shown is computed from the image.".to_string(),
+            ),
+            None => {}
+        }
+    }
+    if window.is_some() && series::sigmoid(ref_set, ref_frame.frame) {
+        warnings.push("The file's window is SIGMOID: it is shown as a straight (LINEAR) window.".to_string());
+    }
     let info = Info {
         inverted: ref_desc.photometric == Photometric::Monochrome1,
-        window: if colour { None } else { ref_frame.window },
+        window,
         start,
         patient,
         series_uid: ref_set.text(tags::SERIES_INSTANCE),

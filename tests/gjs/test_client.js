@@ -823,10 +823,14 @@ async function testLabelVolume() {
     check(await waitGone(pid, 2000), 'backend exits');
 }
 
+// Settings files written by the tests, removed at the end of the run.
+const temporaries = [];
+
 function writeTemp(content) {
     const [file, stream] = Gio.File.new_tmp('nifti-preview-settings-XXXXXX.ini');
     stream.get_output_stream().write_all(typeof content === 'string' ? new TextEncoder().encode(content) : content, null);
     stream.close(null);
+    temporaries.push(file);
     return file.get_path();
 }
 
@@ -1091,6 +1095,9 @@ async function testTerminalParity() {
                 const mine = JSON.stringify(strip(metadataSections(state)));
                 const rust = JSON.stringify(strip(theirs.sections));
                 check(mine === rust, `${t.name}: same panel\n  js:   ${mine}\n  rust: ${rust}`);
+                // The warnings above the panel: the header's, then the notes of the statistics.
+                const shown = JSON.stringify((state.header.warnings ?? []).concat(state.stats?.notes ?? []));
+                check(JSON.stringify(theirs.warnings) === shown, `${t.name}: same warnings (${JSON.stringify(theirs.warnings)} vs ${shown})`);
                 check(theirs.readout === readoutText(state), `${t.name}: same readout (${JSON.stringify(theirs.readout)} vs ${JSON.stringify(readoutText(state))})`);
                 check(theirs.effective_colormap === state.effectiveColormap, `${t.name}: same colormap`);
                 // The label list (names escaped for Pango on this side).
@@ -1142,5 +1149,12 @@ async function main() {
 const loop = new GLib.MainLoop(null, false);
 main().finally(() => loop.quit());
 loop.run();
+for (const file of temporaries) {
+    try {
+        file.delete(null);
+    } catch (e) {
+        printerr(`could not remove ${file.get_path()}: ${e.message}`);
+    }
+}
 print(`${passed} checks passed, ${failures} failed`);
 System.exit(failures ? 1 : 0);

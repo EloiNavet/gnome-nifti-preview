@@ -61,6 +61,29 @@ fn click(p: &mut Pty, x: usize, y: usize) {
     p.send(format!("\x1b[<0;{};{}M\x1b[<0;{};{}m", x + 1, y + 1, x + 1, y + 1).as_bytes());
 }
 
+/// The panel starts with the warnings of the GNOME viewer.
+#[test]
+fn panel_shows_the_warnings() {
+    if !pty::available() {
+        return;
+    }
+    within(60, "panel warnings", || {
+        let dir = tmpdir("tui-warnings");
+        let mut n = Nifti::new(&[8, 8, 8], 2);
+        n.sform_code = 0;
+        n.qform_code = 0;
+        let f = dir.join("plain.nii");
+        std::fs::write(&f, n.file(&[7u8; 512])).unwrap();
+        let mut p = start(&f, 140, 44, Answers::xterm(), &[]);
+        shown(&mut p);
+        p.send(b"\t");
+        p.expect("No valid qform/sform");
+        p.expect("Dimensions");
+        p.send(b"q");
+        assert!(p.wait(10).success());
+    });
+}
+
 #[test]
 fn draws_moves_and_gives_the_terminal_back() {
     if !pty::available() {

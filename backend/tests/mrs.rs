@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{gz, tmpdir, Nifti};
+use common::{gz, tmpdir, Nifti, TestFile};
 use gnome_nifti_preview::mrs::Spectrum;
 use gnome_nifti_preview::server::{respond, Session};
 use gnome_nifti_preview::volume::Volume;
@@ -55,8 +55,8 @@ fn svs(dims: &[i64], json: Vec<u8>) -> Nifti {
     n
 }
 
-fn write(name: &str, bytes: Vec<u8>) -> std::path::PathBuf {
-    let p = tmpdir("mrs").join(name);
+fn write(name: &str, bytes: Vec<u8>) -> TestFile {
+    let p = tmpdir("mrs").file(name);
     std::fs::write(&p, bytes).unwrap();
     p
 }
@@ -364,9 +364,9 @@ fn protocol() {
     let t1 = write("t1.nii", Nifti::new(&[4, 4, 4], 2).file(&[1u8; 64]));
     let mut s = Session::new(0);
     let mut ask = |req: Value| respond(&mut s, req.to_string().as_bytes()).0;
-    assert_eq!(ask(json!({"id": 1, "op": "open", "path": t1}))["ok"], true);
+    assert_eq!(ask(json!({"id": 1, "op": "open", "path": *t1}))["ok"], true);
     assert_eq!(ask(json!({"id": 2, "op": "spectrum"}))["error"]["code"], "bad_request");
-    let open = ask(json!({"id": 3, "op": "open", "path": path}));
+    let open = ask(json!({"id": 3, "op": "open", "path": *path}));
     assert_eq!(open["header"]["mrs"]["nucleus"], "1H", "{open}");
     let r = ask(json!({"id": 4, "op": "spectrum"}));
     assert_eq!((r["ok"].clone(), r["unit"].clone(), r["points"].clone()), (json!(true), json!("ppm"), json!(64)), "{r}");

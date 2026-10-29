@@ -120,7 +120,8 @@ fn requests_while_loading_and_cancel() {
         }
     }
     // Another file while loading: the load is given up, the new file opens.
-    let q = image(&tmpdir("net-other"), false);
+    let other = tmpdir("net-other");
+    let q = image(&other, false);
     let r = request(&mut s, json!({"op": "open", "path": q}));
     assert_eq!(r["ok"], true, "{r}");
     let (r, _) = load_async(&mut s);

@@ -32,7 +32,7 @@ fn invalid(what: impl std::fmt::Display) -> PreviewError {
 #[derive(Debug)]
 struct Text {
     /// Each file, where its text starts, and the lines to skip there.
-    parts: Vec<(PathBuf, u64, usize)>,
+    parts: Vec<Part>,
     hex: bool,
     dtype: DType,
     /// Values (ascii) or bytes (hex) to read.
@@ -76,11 +76,11 @@ impl Decode for Text {
         let mut done = 0u64;
         let mut token = String::new();
         let mut nibble: Option<u8> = None;
-        for (path, start, lines) in &self.parts {
+        for (path, root, start, lines) in &self.parts {
             if done == self.count {
                 break;
             }
-            let file = crate::source::open_data_file(path)?;
+            let file = crate::source::open_data_file_in(path, root.as_deref())?;
             let mut reader = BufReader::with_capacity(1 << 20, crate::source::At { file: &file, pos: *start });
             let mut skip = *lines;
             loop {
@@ -148,7 +148,7 @@ impl Decode for Text {
 /// skipped, then `skip` bytes of what it decompresses to.
 #[derive(Debug)]
 struct Bzip2 {
-    parts: Vec<(PathBuf, u64, usize)>,
+    parts: Vec<Part>,
     skip: u64,
     bytes: u64,
     input: u64,
@@ -161,11 +161,11 @@ impl Decode for Bzip2 {
         }
         crate::progress::expect(self.input, false);
         let mut out = Vec::new();
-        for (path, start, lines) in &self.parts {
+        for (path, root, start, lines) in &self.parts {
             if out.len() as u64 >= self.bytes {
                 break;
             }
-            let file = crate::source::open_data_file(path)?;
+            let file = crate::source::open_data_file_in(path, root.as_deref())?;
             let mut reader = BufReader::with_capacity(1 << 20, crate::source::At { file: &file, pos: *start });
             let mut line = Vec::new();
             for _ in 0..*lines {
@@ -194,15 +194,19 @@ impl Decode for Bzip2 {
 /// The files a decoder reads (this one after its header, or the detached
 /// ones, taken from `layout`: where their data start, lines to skip) and
 /// about how many bytes they hold.
-fn decoded_parts(layout: &mut DataLayout, path: &Path) -> (Vec<(PathBuf, u64, usize)>, u64) {
-    let parts: Vec<(PathBuf, u64, usize)> = if layout.files.is_empty() {
-        vec![(path.to_path_buf(), layout.offset, 0)]
+fn decoded_parts(layout: &mut DataLayout, path: &Path) -> (Vec<Part>, u64) {
+    let parts: Vec<Part> = if layout.files.is_empty() {
+        vec![(path.to_path_buf(), None, layout.offset, 0)]
     } else {
-        std::mem::take(&mut layout.files).into_iter().map(|f| (f.path, 0, f.line_skip)).collect()
+        std::mem::take(&mut layout.files).into_iter().map(|f| (f.path, f.root, 0, f.line_skip)).collect()
     };
-    let input = parts.iter().map(|(p, start, _)| std::fs::metadata(p).map_or(0, |m| m.len().saturating_sub(*start))).sum();
+    let input = parts.iter().map(|(p, _, start, _)| std::fs::metadata(p).map_or(0, |m| m.len().saturating_sub(*start))).sum();
     (parts, input)
 }
+
+/// A file a decoder reads: its path, the folder it must stay in (detached
+/// data), where its data start and the lines to skip.
+type Part = (PathBuf, Option<PathBuf>, u64, usize);
 
 /// Length of the header in `text` (up to and including the empty line), if
 /// complete.
@@ -490,7 +494,10 @@ pub fn parse(bytes: &[u8], data_start: u64, path: &Path) -> Result<ImageHeader> 
             let names = detached_files(spec, &list_files)?;
             layout.files = names
                 .into_iter()
-                .map(|n| Ok(DataFile { path: crate::image::data_file_in(dir, &n, "NRRD")?, line_skip, byte_skip }))
+                .map(|n| {
+                    let (path, root) = crate::image::data_file_in(dir, &n, "NRRD")?;
+                    Ok(DataFile { path, root: Some(root), line_skip, byte_skip })
+                })
                 .collect::<Result<_>>()?;
             layout.files_gzip = gzip;
         }

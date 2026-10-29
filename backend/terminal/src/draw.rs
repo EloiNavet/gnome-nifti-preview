@@ -102,6 +102,16 @@ pub fn view_cells(screen: &mut Screen, caps: &Caps, image: Rect, pic: &Picture) 
 }
 
 /// The panel's sections as lines of text, keys aligned per section.
+/// The warnings shown above the panel, in lines of `w` cells, and an empty
+/// line after them.
+pub fn warning_lines(warnings: &[String], w: usize) -> Vec<(String, Style)> {
+    let mut lines: Vec<(String, Style)> = warnings.iter().flat_map(|x| text::wrap(x, w)).map(|l| (l, Style::default())).collect();
+    if !lines.is_empty() {
+        lines.push((String::new(), Style::default()));
+    }
+    lines
+}
+
 pub fn section_lines(sections: &[Section]) -> Vec<(String, Style)> {
     let mut lines = Vec::new();
     for s in sections {

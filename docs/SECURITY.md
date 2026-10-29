@@ -37,7 +37,10 @@ replies and RGB pixels from it.
   are checked before anything is allocated. Data files named by a NRRD `.nhdr`
   or an MRtrix `.mih` (at most 16 384, in its folder: an absolute path or `..` is refused, as for a
   MetaImage `.mhd`) get the same checks as the image
-  (a regular file, opened without blocking); they are only read.
+  (a regular file, opened without blocking); they are only read. A symbolic link
+  among them is followed only to a file in the header's folder: the file actually
+  opened is checked (`/proc/self/fd`). The images a DICOMDIR lists stay in its
+  folder the same way, checked when the DICOMDIR is read.
 - Files on network file systems are never memory-mapped (a dropped connection
   would end the backend with SIGBUS); they are read in blocks, in the
   background, and a load given up (another file, closing) stops reading.

@@ -122,6 +122,17 @@
      segmentations, thumbnails in Files, a Preferences window, files on network shares.
      Works with GNOME Sushi 46 to 51.</p>
 
+  <h2>In a terminal</h2>
+  <p>The same images over SSH, on a cluster or in a container, without GNOME: <code>nitty</code>.</p>
+  <pre>wget -qO- https://raw.githubusercontent.com/EloiNavet/gnome-nifti-preview/main/get.sh | bash -s -- --terminal</pre>
+  <p class="note">One static program in <code>~/.local/bin</code> (or <code>/usr/local/bin</code> as root), and
+     nothing else. Every format of the preview is read, DICOM series included.</p>
+  <pre>nitty T1w.nii.gz        <span class="c"># the viewer (q quits, ? lists the keys)</span>
+nitty -p T1w.nii.gz     <span class="c"># a quick look: the three views, printed</span></pre>
+  <p class="note">Terminals that draw images (Kitty, Ghostty, WezTerm, iTerm2, Konsole, foot, xterm with Sixel)
+     get real pictures; the others (GNOME Terminal, Ptyxis, the Linux console, tmux) get coloured half-blocks.
+     <a href="https://github.com/EloiNavet/gnome-nifti-preview#in-a-terminal">More in the README</a>.</p>
+
   <footer>
     <span><a href="https://github.com/EloiNavet/gnome-nifti-preview">Source on GitHub</a> · GPL-2.0-or-later (images CC BY 4.0) · Not a medical device</span>
     <span>On macOS or Windows? See <a href="https://github.com/marcoduering/MIQ">MIQ</a>.</span>

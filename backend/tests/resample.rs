@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{tmpdir, Nifti};
+use common::{tmpdir, Nifti, TestFile};
 use gnome_nifti_preview::orientation::voxel_to_world;
 use gnome_nifti_preview::volume::Volume;
 
@@ -34,7 +34,7 @@ fn linear(w: [f64; 3]) -> f64 {
     0.5 * w[0] - 0.25 * w[1] + 0.75 * w[2] + 100.0
 }
 
-fn write(name: &str, datatype: i16, voxel: impl Fn([usize; 3]) -> Vec<u8>) -> std::path::PathBuf {
+fn write(name: &str, datatype: i16, voxel: impl Fn([usize; 3]) -> Vec<u8>) -> TestFile {
     let mut n = Nifti::new(&SHAPE.map(|x| x as i64), datatype);
     n.srow = srow();
     let mut data = Vec::new();
@@ -45,7 +45,7 @@ fn write(name: &str, datatype: i16, voxel: impl Fn([usize; 3]) -> Vec<u8>) -> st
             }
         }
     }
-    let path = tmpdir("resample").join(name);
+    let path = tmpdir("resample").file(name);
     std::fs::write(&path, n.file(&data)).unwrap();
     path
 }
@@ -158,12 +158,12 @@ fn nearest_voxel_for_labels_and_colours_per_channel() {
 fn flat_and_straight_images_are_not_resampled() {
     let mut n = Nifti::new(&[30, 20, 1], 2);
     n.srow = srow();
-    let path = tmpdir("resample").join("flat.nii");
+    let path = tmpdir("resample").file("flat.nii");
     std::fs::write(&path, n.file(&vec![1u8; 600])).unwrap();
     let vol = Volume::open(&path).unwrap();
     assert!(!vol.plans("neurological").unwrap()[0].grid.resampled, "a single tilted slice keeps its grid");
 
-    let path = tmpdir("resample").join("straight.nii");
+    let path = tmpdir("resample").file("straight.nii");
     std::fs::write(&path, Nifti::new(&[8, 9, 10], 2).file(&[1u8; 720])).unwrap();
     let vol = Volume::open(&path).unwrap();
     let plans = vol.plans("neurological").unwrap();
@@ -181,7 +181,7 @@ fn protocol_grid_cursor_and_values() {
     });
     let mut s = Session::new(0);
     let mut ask = |req: Value| respond(&mut s, req.to_string().as_bytes()).0;
-    let open = ask(json!({"id": 1, "op": "open", "path": path}));
+    let open = ask(json!({"id": 1, "op": "open", "path": *path}));
     assert_eq!(open["grid"]["resampled"], true, "{open}");
     let shape: Vec<u64> = open["grid"]["shape"].as_array().unwrap().iter().map(|x| x.as_u64().unwrap()).collect();
     assert_eq!(open["cursor"], json!(shape.iter().map(|n| n / 2).collect::<Vec<_>>()));

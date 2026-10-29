@@ -91,7 +91,8 @@ pub fn run(o: &Options, path: &Path, caps: &Caps, cols: usize, rows: Option<usiz
         }
     }
     if o.info {
-        let lines = draw::section_lines(&v.sections(o.patient)?);
+        let mut lines = draw::warning_lines(&v.warnings()?, cols);
+        lines.extend(draw::section_lines(&v.sections(o.patient)?));
         let mut s = Screen::new(cols, lines.len());
         for (y, (l, style)) in lines.iter().enumerate() {
             s.put(0, y, l, *style, cols);
@@ -167,7 +168,7 @@ fn panel_json(v: &mut Viewer, o: &Options, out: &mut Vec<u8>) -> Result<()> {
         panel::volume_text(&v.header(), k, k, None)
     });
     let doc = json!({
-        "cursor": v.cursor, "effective_colormap": cmap, "sections": sections,
+        "cursor": v.cursor, "effective_colormap": cmap, "sections": sections, "warnings": v.warnings()?,
         "readout": panel::readout_text(&r, cmap, true, false), "labels": labels, "volume": volume,
     });
     out.extend_from_slice(serde_json::to_string_pretty(&doc).unwrap_or_default().as_bytes());

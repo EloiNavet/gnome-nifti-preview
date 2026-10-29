@@ -55,6 +55,27 @@ pub fn str_width(s: &str) -> usize {
     s.chars().filter(|&c| printable(c)).map(width).sum()
 }
 
+/// `s` cleaned and cut into lines of at most `w` cells at its spaces (a
+/// word longer than a line ends with "…").
+pub fn wrap(s: &str, w: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in clean(s).split_whitespace() {
+        if !line.is_empty() && str_width(&line) + 1 + str_width(word) > w {
+            lines.push(fit(&line, w));
+            line.clear();
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(fit(&line, w));
+    }
+    lines
+}
+
 /// `s` cut to at most `w` cells, ending with "…" when cut.
 pub fn fit(s: &str, w: usize) -> String {
     if str_width(s) <= w {
@@ -98,5 +119,14 @@ mod tests {
         assert_eq!(fit("山田太郎", 5), "山田…");
         assert_eq!(fit("abc", 3), "abc");
         assert_eq!(fit("abcd", 0), "");
+    }
+
+    #[test]
+    fn wrapped_at_spaces() {
+        assert_eq!(wrap("The 8 volumes are 4 time points", 12), ["The 8", "volumes are", "4 time", "points"]);
+        assert_eq!(wrap("abcdefghij x", 5), ["abcd…", "x"], "a word longer than the line is cut");
+        assert_eq!(wrap("  two   spaces ", 20), ["two spaces"]);
+        assert_eq!(wrap("a\x1b[31mb", 20), ["a[31mb"], "cleaned");
+        assert!(wrap("", 10).is_empty());
     }
 }

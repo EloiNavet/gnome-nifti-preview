@@ -307,6 +307,16 @@ impl Volume {
                 ));
             }
         }
+        // What assembling a DICOM series found (images left out, slices
+        // missing, echoes without times, a VOI LUT not applied...) is for the
+        // user to read, not a repair of an out-of-spec header.
+        let dicom = matches!(h.format, crate::image::Format::Dicom);
+        let fixes = if dicom {
+            warnings.extend(h.warnings.iter().cloned());
+            Vec::new()
+        } else {
+            h.warnings.clone()
+        };
         let name = self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let (qform_code, sform_code) = h.nifti.as_ref().map_or((0, 0), |n| (n.qform_code, n.sform_code));
         let fields: Vec<Value> = h.fields.iter().map(|(k, v)| json!([k, v])).collect();
@@ -341,7 +351,7 @@ impl Volume {
             "descrip": h.descrip,
             "format_fields": fields,
             "warnings": warnings,
-            "header_fixes": h.warnings,
+            "header_fixes": fixes,
             "mrs": self.mrs.as_ref().map(|m| m.to_json(self.shape3)),
             "storage": {"network": self.storage.network, "fs": self.storage.fs, "bytes_to_read": self.bytes_to_read()},
             "dicom": h.dicom.as_ref().map(|d| json!({

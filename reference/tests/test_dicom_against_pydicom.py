@@ -3,10 +3,12 @@ test files pydicom ships (every transfer syntax: native in both byte
 orders, deflated, RLE, JPEG baseline, extended and lossless, JPEG-LS,
 JPEG 2000, colour, palettes). pydicom is the oracle here, as nibabel is for
 NIfTI; the compressed files need its decoder plugins (pylibjpeg-libjpeg,
-pylibjpeg-openjpeg, pyjpegls), else they are skipped."""
+pylibjpeg-openjpeg, pyjpegls), else they are skipped, or fail with
+NIFTI_PREVIEW_REQUIRE_CODECS=1 (the reference CI job)."""
 
 from __future__ import annotations
 
+import os
 import warnings
 
 import numpy as np
@@ -53,6 +55,8 @@ def reference_pixels(path):
         try:
             a = ds.pixel_array
         except Exception as e:  # a decoder plugin missing
+            if os.environ.get("NIFTI_PREVIEW_REQUIRE_CODECS") == "1":
+                pytest.fail(f"pydicom cannot decode {path} (NIFTI_PREVIEW_REQUIRE_CODECS=1): {e}")
             pytest.skip(f"pydicom cannot decode {path}: {e}")
     if ds.get("PhotometricInterpretation") == "PALETTE COLOR":
         a = apply_color_lut(a, ds)

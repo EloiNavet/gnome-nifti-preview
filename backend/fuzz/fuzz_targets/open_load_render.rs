@@ -12,10 +12,21 @@ use gnome_nifti_preview::render::render_slice;
 use gnome_nifti_preview::volume::Volume;
 use libfuzzer_sys::fuzz_target;
 
+/// Removes the input's folder when an input is done, whichever way it ends
+/// (declared before the volume, so dropped after it).
+struct Cleanup(std::path::PathBuf);
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     // Alone in its folder: a DICOM file looks for the rest of its series there.
     let dir = std::env::temp_dir().join(format!("np-fuzz-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
+    let _cleanup = Cleanup(dir.clone());
     let path = dir.join("input");
     std::fs::write(&path, data).unwrap();
     // 16 MiB of voxels: this build (sanitiser, coverage) runs about a

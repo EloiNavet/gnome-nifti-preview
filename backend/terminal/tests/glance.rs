@@ -300,3 +300,35 @@ fn usage_edges() {
     assert!(o.status.success() && !String::from_utf8_lossy(&o.stderr).contains("panicked"));
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The warnings the GNOME viewer shows above its panel (here: no orientation,
+/// and NaN voxels) come before the sections of --info, cut to the width, and
+/// in --panel-json.
+#[test]
+fn warnings_before_the_panel() {
+    let dir = tmpdir("glance-warnings");
+    let mut n = Nifti::new(&[6, 5, 4], 16);
+    n.sform_code = 0;
+    n.qform_code = 0;
+    let mut data: Vec<u8> = (0..120).flat_map(|i| (i as f32).to_le_bytes()).collect();
+    data[0..4].copy_from_slice(&f32::NAN.to_le_bytes());
+    let f = dir.join("plain.nii");
+    std::fs::write(&f, n.file(&data)).unwrap();
+    let o = nitty(&["-p", "--info", "--width", "40", f.to_str().unwrap()], &[("TERM", "dumb")]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let out = stdout(&o);
+    let warning = out.find("No valid qform/sform:").expect("the orientation warning");
+    assert!(out.contains("1 NaN/Inf voxels (shown black)."), "{out}");
+    assert!(warning < out.find("Geometry").unwrap(), "before the panel: {out}");
+    assert!(out.lines().all(|l| l.chars().count() <= 40), "cut to the width: {out}");
+    let o = nitty(&["-p", "--panel-json", f.to_str().unwrap()], &[]);
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(
+        v["warnings"],
+        serde_json::json!([
+            "No valid qform/sform: anatomical orientation is unknown, showing stored voxel axes.",
+            "1 NaN/Inf voxels (shown black)."
+        ])
+    );
+}
+

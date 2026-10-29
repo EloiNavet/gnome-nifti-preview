@@ -30,6 +30,8 @@ jobs:
         run: |
           rustup toolchain install ${{ matrix.toolchain }} --profile minimal --component clippy
           rustup default ${{ matrix.toolchain }}
+      - name: A temporary folder of its own (checked empty after the tests)
+        run: mkdir "$RUNNER_TEMP/np" && echo "TMPDIR=$RUNNER_TEMP/np" >> "$GITHUB_ENV"
       - name: Test (debug)
         working-directory: backend
         run: |
@@ -40,6 +42,10 @@ jobs:
         run: |
           cargo test --release --locked
           cargo test --release --locked --no-default-features
+      - name: No test folder left behind
+        run: |
+          left="$(find "$TMPDIR" -mindepth 1 -maxdepth 1 -name 'np-test-*')"
+          if [ -n "$left" ]; then echo "::error::the tests left folders behind:"; echo "$left"; exit 1; fi
       - name: Clippy
         working-directory: backend
         run: |
@@ -77,6 +83,8 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends tmux
+      - name: A temporary folder of its own (checked empty after the tests)
+        run: mkdir "$RUNNER_TEMP/np" && echo "TMPDIR=$RUNNER_TEMP/np" >> "$GITHUB_ENV"
       - name: Clippy
         working-directory: backend
         run: |
@@ -98,6 +106,10 @@ jobs:
           NITTY_REQUIRE_PTY: 1
           NITTY_REQUIRE_SANDBOX: 1
         run: cargo test -p nitty --release --locked
+      - name: No test folder left behind
+        run: |
+          left="$(find "$TMPDIR" -mindepth 1 -maxdepth 1 -name 'np-test-*')"
+          if [ -n "$left" ]; then echo "::error::the tests left folders behind:"; echo "$left"; exit 1; fi
 
   # The binary the installer tests use, apart from the tests above: a test
   # of nitty failing does not stop the GNOME checks.
@@ -146,9 +158,14 @@ jobs:
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-deny
-      - name: Known vulnerabilities, licences, sources
+      - name: Known vulnerabilities, licences, sources (the library, the preview and nitty)
         working-directory: backend
-        run: cargo deny check
+        run: cargo deny --workspace check
+      - name: Known vulnerabilities and sources of the fuzzing tools (not distributed)
+        working-directory: backend
+        run: cargo deny --manifest-path fuzz/Cargo.toml check advisories sources
+      - name: Every crate compiled in has its notice
+        run: tools/check-notices.sh
       - name: shellcheck
         run: git ls-files -z '*.sh' | xargs -0 shellcheck -x -S warning
 
@@ -205,12 +222,22 @@ jobs:
           path: bin
       - run: chmod +x bin/nifti-preview
       - run: pip install -e "reference[test,dicom]"
-      - name: DICOM decoder plugins (binary wheels only; without them those files are skipped)
-        run: "pip install --only-binary=:all: pylibjpeg pylibjpeg-libjpeg pylibjpeg-openjpeg pyjpegls || true"
+      # Without them the DICOM files they decode are skipped. Python 3.12 is
+      # the reference: there they must install and decode every file; the
+      # other versions may lack a wheel (pyjpegls on a new Python).
+      - name: DICOM decoder plugins (binary wheels only)
+        run: |
+          if [ "${{ matrix.python }}" = 3.12 ]; then
+            pip install --only-binary=:all: pylibjpeg pylibjpeg-libjpeg pylibjpeg-openjpeg pyjpegls
+          else
+            pip install --only-binary=:all: pylibjpeg pylibjpeg-libjpeg pylibjpeg-openjpeg pyjpegls || echo "::warning::DICOM decoder plugins missing on Python ${{ matrix.python }}: their files are skipped"
+          fi
       - name: pytest (the Rust backend must match nibabel and pydicom)
         env:
           NIFTI_PREVIEW_BIN: ${{ github.workspace }}/bin/nifti-preview
-        run: pytest -q reference
+          NIFTI_PREVIEW_REQUIRE_CODECS: ${{ matrix.python == '3.12' && '1' || '' }}
+        # -rs: the reason of every skipped test, in the log.
+        run: pytest -q -rs reference
 
   desktop-headless:
     name: GJS client, Sushi registry, MIME, install

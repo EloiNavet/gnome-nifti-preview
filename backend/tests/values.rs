@@ -7,15 +7,15 @@ mod common;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
-use common::{tmpdir, Nifti};
+use common::{tmpdir, Nifti, TestFile};
 use gnome_nifti_preview::orientation::build_plans;
 use gnome_nifti_preview::render::render_slice;
 use gnome_nifti_preview::server::{respond, Session};
 use gnome_nifti_preview::volume::Volume;
 use serde_json::{json, Value};
 
-fn write(name: &str, bytes: Vec<u8>) -> std::path::PathBuf {
-    let p = tmpdir("values").join(name);
+fn write(name: &str, bytes: Vec<u8>) -> TestFile {
+    let p = tmpdir("values").file(name);
     std::fs::write(&p, bytes).unwrap();
     p
 }
@@ -58,7 +58,7 @@ fn scaling_compensates_before_reducing_display_precision() {
                 let (pixels, _) = render_slice(&mut v, &plans[0], 0, "gray", &mut Vec::new()).unwrap();
                 assert!(pixels.iter().any(|&x| x != 0));
                 let mut session = Session::new(0);
-                respond(&mut session, json!({"op":"open","path":path}).to_string().as_bytes());
+                respond(&mut session, json!({"op":"open","path":*path}).to_string().as_bytes());
                 let load = respond(&mut session, br#"{"op":"load"}"#).0;
                 assert_eq!(load["stats"]["window"]["status"], "ok", "{load}");
                 assert_eq!(load["stats"]["non_finite"], 0);
@@ -86,7 +86,7 @@ fn large_label_identifiers_stay_distinct() {
     let path = write("labels.nii", Nifti::new(&[4, 4, 4], 768).file(&data));
     let mut s = Session::new(0);
     let mut ask = |req: Value| respond(&mut s, req.to_string().as_bytes()).0;
-    ask(json!({"id": 1, "op": "open", "path": path}));
+    ask(json!({"id": 1, "op": "open", "path": *path}));
     let load = ask(json!({"id": 2, "op": "load"}));
     assert_eq!(load["stats"]["labels"]["n_labels"], 2, "{load}");
     let a = ask(json!({"id": 3, "op": "value", "ijk": [0, 0, 2]}));
@@ -134,7 +134,7 @@ fn exact_scalar_labels_and_metadata() {
                     let wire = |v: i128| if v > (1 << 53) - 1 { json!(v.to_string()) } else if dtype == 64 { json!(v as f64) } else { json!(v as u64) };
                     let mut s = Session::new(0);
                     let mut ask = |req: Value| respond(&mut s, req.to_string().as_bytes()).0;
-                    let opened = ask(json!({"id":1,"op":"open","path":path,"mode":"stored"}));
+                    let opened = ask(json!({"id":1,"op":"open","path":*path,"mode":"stored"}));
                     assert_eq!(opened["ok"], true, "{opened}");
                     let load = ask(json!({"id":2,"op":"load"}));
                     assert_eq!(load["stats"]["labels"]["n_labels"], 2, "{load}");
@@ -195,7 +195,7 @@ fn world_coordinates_are_in_mm() {
         let path = write(&format!("units{unit}.nii"), n.file(&[1u8; 27]));
         let mut s = Session::new(0);
         let mut ask = |req: Value| respond(&mut s, req.to_string().as_bytes()).0;
-        ask(json!({"id": 1, "op": "open", "path": path}));
+        ask(json!({"id": 1, "op": "open", "path": *path}));
         let r = ask(json!({"id": 2, "op": "value", "ijk": [1, 1, 1]}));
         let w: Vec<f64> = r["world"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
         worlds.push(w);
@@ -262,12 +262,46 @@ fn short_of_memory_answers_instead_of_aborting() {
             out.read_line(&mut line).unwrap();
             serde_json::from_str(&line).unwrap_or_else(|e| panic!("{mib} MiB: no reply ({e}): {line:?}"))
         };
-        ask(json!({"id": 1, "op": "open", "path": path}));
+        ask(json!({"id": 1, "op": "open", "path": *path}));
         let load = ask(json!({"id": 2, "op": "load"}));
         assert!(load["ok"] == true || load["error"]["code"] == "too_large", "{mib} MiB: {load}");
         assert_eq!(ask(json!({"id": 3, "op": "ping"}))["ok"], true, "{mib} MiB");
         drop(stdin);
         let status = child.wait().unwrap();
         assert!(status.success(), "{mib} MiB: {status:?}");
+    }
+}
+
+/// `dump` writes the stored values in little endian, as its JSON says,
+/// whatever the byte order of the file (big-endian files were copied as they
+/// are); each component of a complex value is swapped, RGB bytes are not.
+#[test]
+fn dump_writes_little_endian() {
+    let floats = [1.5f32, -2.25, 1e30, 7.0, 0.0, -0.5, 3.0, 9.75];
+    let shorts = [1i16, -2, 300, -30000, 7, 0, 12345, -1];
+    let cases: Vec<(i16, Vec<u8>, Vec<u8>)> = vec![
+        (16, floats.iter().flat_map(|x| x.to_be_bytes()).collect(), floats.iter().flat_map(|x| x.to_le_bytes()).collect()),
+        (4, shorts.iter().flat_map(|x| x.to_be_bytes()).collect(), shorts.iter().flat_map(|x| x.to_le_bytes()).collect()),
+        // complex64: (re, im) pairs of float32.
+        (32, floats.iter().chain(&floats).flat_map(|x| x.to_be_bytes()).collect(), floats.iter().chain(&floats).flat_map(|x| x.to_le_bytes()).collect()),
+        (128, (0..24u8).collect(), (0..24u8).collect()),
+    ];
+    for (datatype, stored, expected) in cases {
+        for big in [true, false] {
+            let mut n = Nifti::new(&[2, 2, 2], datatype);
+            let data = if big {
+                n = n.be();
+                stored.clone()
+            } else {
+                expected.clone()
+            };
+            let path = write(&format!("dump-{datatype}-{big}.nii"), n.file(&data));
+            let out = path.with_extension("raw");
+            let r = Command::new(env!("CARGO_BIN_EXE_nifti-preview")).args(["dump"]).arg(&*path).arg(&out).output().unwrap();
+            assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+            let json: Value = serde_json::from_slice(&r.stdout).unwrap();
+            assert_eq!(json["endian"], "little");
+            assert_eq!(std::fs::read(&out).unwrap(), expected, "datatype {datatype}, big endian {big}");
+        }
     }
 }

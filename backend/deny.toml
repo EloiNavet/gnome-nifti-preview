@@ -16,6 +16,9 @@ confidence-threshold = 0.9
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# nitty depends on the library by path, without a version: allowed because
+# neither crate is published (publish = false).
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"

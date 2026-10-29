@@ -119,7 +119,8 @@ pub fn parse(text: &[u8], dir: &Path) -> Result<ImageHeader> {
                 if name == "." || skip < 0 || detached.len() >= crate::formats::nrrd::MAX_FILES {
                     return Err(invalid(format_args!("file: {f}")));
                 }
-                detached.push(DataFile { path: crate::image::data_file_in(dir, name, "MRtrix")?, line_skip: 0, byte_skip: skip });
+                let (path, root) = crate::image::data_file_in(dir, name, "MRtrix")?;
+                detached.push(DataFile { path, root: Some(root), line_skip: 0, byte_skip: skip });
             }
             0
         }

@@ -9,7 +9,7 @@ The process exits on EOF or after `close`.
 On start the backend writes:
 
 ```json
-{"event":"hello","protocol":2,"version":"0.2.0","pid":1234,"backend":"rust",
+{"event":"hello","protocol":2,"version":"0.2.1","pid":1234,"backend":"rust",
  "sandbox":{"data_limit":4630511616,"no_new_privs":true,"seccomp":true,"landlock":7}}
 ```
 
@@ -125,8 +125,10 @@ a resampled grid finer than the acquired slices).
 `qform_code`/`qform`, `sform_code`/`sform`, `affine_source`
 (`sform`/`qform`/`none`), `affine` (4×4), `orientation` (e.g. `LPS`, or
 `unknown`), `orientation_known`, `obliquity_deg`, `intent`, `intent_code`,
-`descrip`, `warnings` (shown to the user) and `header_fixes` (repairs applied to
-an out-of-spec header).
+`descrip`, `warnings` (shown to the user: orientation, obliquity, spectra, and
+for DICOM what assembling the image found: images left out, missing slices,
+irregular spacing, echoes given no times, a VOI LUT not applied...) and
+`header_fixes` (repairs applied to an out-of-spec header).
 
 `storage` tells where the file is: `network` (a network file system: NFS,
 SMB/CIFS, sshfs, GVfs…), `fs` (its type, as the kernel names it) and

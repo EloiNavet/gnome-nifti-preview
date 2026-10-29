@@ -8,6 +8,10 @@ name: Release
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  # A dry run (Actions > Release > Run workflow): the same builds, tests and
+  # archives, kept as the run's artifacts; nothing is published. On a public
+  # repository it builds aarch64 too, which can then be checked before a tag.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -77,12 +81,6 @@ jobs:
   package:
     needs: [build, terminal]
     runs-on: ubuntu-24.04
-    # Only this job can write: it publishes what every get.sh downloads, so it
-    # runs no third-party action (gh is GitHub's own CLI on the runner).
-    permissions:
-      contents: write
-      id-token: write
-      attestations: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -90,6 +88,22 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
+      - name: Version (a tag must name the version of the sources)
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' backend/Cargo.toml | head -n1)"
+          terminal="$(sed -n 's/^version = "\(.*\)"$/\1/p' backend/terminal/Cargo.toml | head -n1)"
+          if [ -z "$version" ] || [ "$version" != "$terminal" ]; then
+            echo "::error::backend/Cargo.toml says '$version', backend/terminal/Cargo.toml '$terminal'"; exit 1
+          fi
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tagged="${GITHUB_REF_NAME#v}"
+            # v0.3.0-rc1 is a pre-release of 0.3.0.
+            if [ "${tagged%%-*}" != "$version" ]; then
+              echo "::error::tag $GITHUB_REF_NAME, but the sources are version $version"; exit 1
+            fi
+            version="$tagged"
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
       - name: Assemble the archive downloaded by get.sh
         run: |
           args=()
@@ -99,7 +113,7 @@ jobs:
               args+=("$a=artifacts/bin-$a/nifti-preview")
             fi
           done
-          tools/package.sh "${GITHUB_REF_NAME#v}" dist "${args[@]}"
+          tools/package.sh "$VERSION" dist "${args[@]}"
       - name: Assemble the terminal viewer's archive (get.sh --terminal)
         run: |
           args=()
@@ -109,7 +123,30 @@ jobs:
               args+=("$a=artifacts/nitty-$a/nitty")
             fi
           done
-          tools/package.sh --terminal "${GITHUB_REF_NAME#v}" dist "${args[@]}"
+          tools/package.sh --terminal "$VERSION" dist "${args[@]}"
+      - name: Contents of the archives
+        run: for a in dist/*.tar.gz; do echo "== $a"; tar -tzvf "$a"; done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dist
+          path: dist
+
+  publish:
+    # A tag only: a dry run stops at the archives.
+    if: github.event_name == 'push'
+    needs: package
+    runs-on: ubuntu-24.04
+    # Only this job can write: it publishes what every get.sh downloads, so it
+    # runs no third-party action (gh is GitHub's own CLI on the runner).
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist
+          path: dist
       - name: Build provenance (public repositories)
         if: ${{ !github.event.repository.private }}
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0

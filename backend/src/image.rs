@@ -65,6 +65,9 @@ pub struct StorageAxis {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DataFile {
     pub path: std::path::PathBuf,
+    /// The folder the file must stay in (see [`data_file_in`]); None for
+    /// the header's own file.
+    pub root: Option<std::path::PathBuf>,
     /// Lines, then bytes, to skip at the start of the file (after
     /// decompression for bytes); `byte_skip` -1: the data end the file.
     pub line_skip: usize,
@@ -380,8 +383,10 @@ fn looks_like_mgh(b: &[u8]) -> bool {
 
 /// A data file named by a header (NRRD `.nhdr`, MRtrix `.mih`, MetaImage
 /// `.mhd`), in the header's folder `dir`: never an absolute path or one
-/// through `..`, so that a header cannot show other files.
-pub fn data_file_in(dir: &std::path::Path, name: &str, format: &str) -> Result<std::path::PathBuf> {
+/// through `..`, so that a header cannot show other files. Returns its path
+/// and the folder it must stay in: a symbolic link that leads elsewhere is
+/// refused when the file is opened ([`crate::source::open_data_file_in`]).
+pub fn data_file_in(dir: &std::path::Path, name: &str, format: &str) -> Result<(std::path::PathBuf, std::path::PathBuf)> {
     let p = std::path::Path::new(name);
     if p.is_absolute() || p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
         return Err(crate::error::PreviewError::new(
@@ -389,7 +394,8 @@ pub fn data_file_in(dir: &std::path::Path, name: &str, format: &str) -> Result<s
             format!("{format} data file outside the header's folder: {}", header::clean_text(name)),
         ));
     }
-    Ok(dir.join(p))
+    let root = if dir.as_os_str().is_empty() { std::path::Path::new(".") } else { dir };
+    Ok((dir.join(p), root.to_path_buf()))
 }
 
 /// Error for content that no reader recognises.

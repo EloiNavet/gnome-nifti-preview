@@ -1114,3 +1114,229 @@ fn windows_of_float_data_and_linear_exact() {
     let info = open(&p, false).unwrap().header_info();
     assert_eq!(info["dicom"]["window"], json!([-100.5, 300.5]), "{info}");
 }
+
+/// An enhanced file whose frames all lie at one position: frame n has the
+/// dimension index values `keys[n]` for the `pointers` (StackID and the
+/// temporal position first), and the pixels of `pixels_le(0, n)`.
+fn enhanced_at_one_position(pointers: &[(u16, u16)], keys: &[Vec<u32>]) -> Vec<u8> {
+    let mut els = base_multiframe(keys.len());
+    els.push(ds(t(0x18, 0x80), &[1500.0]));
+    let frame = |values: &Vec<u32>| {
+        vec![
+            sq(t(0x20, 0x9111), vec![vec![El { tag: t(0x20, 0x9157), vr: *b"UL", v: V::U32(values.clone()) }]]),
+            sq(t(0x20, 0x9113), vec![vec![ds(t(0x20, 0x32), &[0.0, 0.0, 0.0])]]),
+        ]
+    };
+    els.push(sq(t(0x5200, 0x9230), keys.iter().map(frame).collect()));
+    els.push(sq(
+        t(0x5200, 0x9229),
+        vec![vec![
+            sq(t(0x20, 0x9116), vec![vec![ds(t(0x20, 0x37), &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0])]]),
+            sq(t(0x28, 0x9110), vec![vec![ds(t(0x28, 0x30), &[1.0, 1.0]), ds(t(0x18, 0x50), &[4.0])]]),
+        ]],
+    ));
+    let pointers = pointers.iter().map(|&(g, e)| vec![El { tag: t(0x20, 0x9165), vr: *b"AT", v: V::U16(vec![g, e]) }]).collect();
+    els.push(sq(t(0x20, 0x9222), pointers));
+    let px: Vec<u8> = (0..keys.len()).flat_map(|f| pixels_le(0, f)).collect();
+    els.push(El { tag: t(0x7FE0, 0x10), vr: *b"OW", v: V::Raw(px) });
+    file(Ts::ExplicitLe, &els)
+}
+
+/// Echoes are not time points: the volumes of an acquisition with several
+/// echoes are kept, in order, but get no times (k × TR would put the echoes
+/// of one time point at different times) and a warning says why.
+#[test]
+fn echoes_are_not_time_points() {
+    let dir = tmpdir("dicom-echoes");
+    let (stack, temporal, echo) = ((0x0020, 0x9056), (0x0020, 0x9128), (0x0018, 0x9082));
+    // Enhanced, 2 time points × 2 echoes (frames t1e1, t1e2, t2e1, t2e2).
+    let keys = vec![vec![1, 1, 1], vec![1, 1, 2], vec![1, 2, 1], vec![1, 2, 2]];
+    let p = write(&dir, "echoes.dcm", &enhanced_at_one_position(&[stack, temporal, echo], &keys));
+    let mut v = open(&p, true).unwrap();
+    assert_eq!(v.header.shape, vec![COLS, ROWS, 1, 4]);
+    assert_eq!(v.header.repetition_time, None, "no times for echoes");
+    let warnings = v.header.warnings.join(" ");
+    assert!(warnings.contains("2 time points × 2 echoes"), "{warnings}");
+    for k in 0..4 {
+        while !v.set_volume(k as i64).unwrap().0 {}
+        assert_values(&mut v, 0, 0, k);
+    }
+    // The same file without the echoes: two time points, 1.5 s apart.
+    let keys = vec![vec![1, 1], vec![1, 2]];
+    let p = write(&dir, "times.dcm", &enhanced_at_one_position(&[stack, temporal], &keys));
+    let v = open(&p, true).unwrap();
+    assert_eq!(v.header.shape, vec![COLS, ROWS, 1, 2]);
+    assert_eq!(v.header.repetition_time, Some(1.5));
+    assert!(v.header.warnings.is_empty(), "{:?}", v.header.warnings);
+    // Only echoes: no times either.
+    let keys = vec![vec![1, 1, 1], vec![1, 1, 2]];
+    let p = write(&dir, "two-echoes.dcm", &enhanced_at_one_position(&[stack, temporal, echo], &keys));
+    let v = open(&p, true).unwrap();
+    assert_eq!(v.header.repetition_time, None);
+    assert!(v.header.warnings.join(" ").contains("2 echoes"), "{:?}", v.header.warnings);
+
+    // A series of single images: two slices, two echoes each (same
+    // acquisition, EchoNumbers 1 and 2).
+    let series = tmpdir("dicom-echo-series");
+    for k in 0..2 {
+        for e in 0..2 {
+            let mut els: Vec<El> = header(&Slice::new(k, e)).into_iter().filter(|x| x.tag != t(0x20, 0x12)).collect();
+            els.push(is(t(0x20, 0x12), 1));
+            els.push(is(t(0x18, 0x86), 1 + e as i64));
+            els.push(ds(t(0x18, 0x81), &[10.0 + 20.0 * e as f64]));
+            els.push(El { tag: t(0x7FE0, 0x10), vr: *b"OW", v: V::Raw(pixels_le(k, e)) });
+            write(&series, &format!("e{k}{e}.dcm"), &file(Ts::ExplicitLe, &els));
+        }
+    }
+    let mut v = open(&series.join("e00.dcm"), true).unwrap();
+    assert_eq!(v.header.shape, vec![COLS, ROWS, 2, 2]);
+    assert_eq!(v.header.repetition_time, None, "no times for echoes");
+    assert!(v.header.warnings.join(" ").contains("2 echoes"), "{:?}", v.header.warnings);
+    while !v.set_volume(1).unwrap().0 {}
+    assert_values(&mut v, 1, 1, 1);
+}
+
+/// Slices whose pixels have another size are left out of the series, like
+/// slices of another size or orientation: one affine cannot place both.
+#[test]
+fn slices_of_another_pixel_spacing_are_left_out() {
+    let dir = tmpdir("dicom-spacing");
+    for k in 0..3 {
+        let mut els = header(&Slice::new(k, 0));
+        if k == 1 {
+            els.retain(|e| e.tag != t(0x28, 0x30));
+            els.push(ds(t(0x28, 0x30), &[1.0, 0.5]));
+        }
+        els.push(El { tag: t(0x7FE0, 0x10), vr: *b"OW", v: V::Raw(pixels_le(k, 0)) });
+        write(&dir, &format!("s{k}.dcm"), &file(Ts::ExplicitLe, &els));
+    }
+    let mut v = open(&dir.join("s0.dcm"), true).unwrap();
+    assert_eq!(v.header.shape, vec![COLS, ROWS, 2], "slice 1 left out");
+    let warnings = v.header.warnings.join(" ");
+    assert!(warnings.contains("1 images of the series have another size, pixel spacing or orientation"), "{warnings}");
+    assert_values(&mut v, 2, 1, 0);
+    // What assembling the series found is shown to the user (warnings), not
+    // listed with the repairs of a header (header_fixes).
+    let mut s = Session::new(1 << 20);
+    let r = request(&mut s, json!({"op": "open", "path": dir.join("s0.dcm")}));
+    assert!(r["header"]["warnings"].to_string().contains("pixel spacing"), "{r}");
+    assert_eq!(r["header"]["header_fixes"], json!([]), "{r}");
+    // Spacings equal but for rounding stay together.
+    let dir = tmpdir("dicom-spacing-rounded");
+    for k in 0..3 {
+        let mut els = header(&Slice::new(k, 0));
+        els.retain(|e| e.tag != t(0x28, 0x30));
+        els.push(ds(t(0x28, 0x30), &[if k == 1 { 0.46875 } else { 0.4688 }, 0.25]));
+        els.push(El { tag: t(0x7FE0, 0x10), vr: *b"OW", v: V::Raw(pixels_le(k, 0)) });
+        write(&dir, &format!("s{k}.dcm"), &file(Ts::ExplicitLe, &els));
+    }
+    let v = open(&dir.join("s0.dcm"), true).unwrap();
+    assert_eq!(v.header.shape, vec![COLS, ROWS, 3]);
+}
+
+/// Double float pixel data keep the rescale of each image (they were all
+/// given the first one's).
+#[test]
+fn double_float_slices_keep_their_own_rescale() {
+    let dir = tmpdir("dicom-f64");
+    for (k, (slope, intercept)) in [(1.0, 0.0), (2.0, 100.0)].into_iter().enumerate() {
+        let drop = [t(0x28, 0x100), t(0x28, 0x101), t(0x28, 0x102), t(0x28, 0x103), t(0x28, 0x1050), t(0x28, 0x1051)];
+        let mut els: Vec<El> = header(&Slice::new(k, 0)).into_iter().filter(|e| !drop.contains(&e.tag)).collect();
+        els.push(us(t(0x28, 0x100), &[64]));
+        els.push(ds(t(0x28, 0x1052), &[intercept]));
+        els.push(ds(t(0x28, 0x1053), &[slope]));
+        let px: Vec<u8> = (0..ROWS * COLS).flat_map(|_| 14f64.to_le_bytes()).collect();
+        els.push(El { tag: t(0x7FE0, 0x09), vr: *b"OD", v: V::Raw(px) });
+        write(&dir, &format!("d{k}.dcm"), &file(Ts::ExplicitLe, &els));
+    }
+    let mut v = open(&dir.join("d0.dcm"), true).unwrap();
+    assert_eq!(v.header.shape, vec![COLS, ROWS, 2]);
+    assert_eq!(v.header.dtype.label(), "float64");
+    assert_eq!(v.value_at([0, 0, 0]).unwrap(), Some(14.0));
+    assert_eq!(v.value_at([0, 0, 1]).unwrap(), Some(128.0), "14 × 2 + 100");
+}
+
+/// An 8-bit image with a VOI LUT and no window. `entries` are the LUT's
+/// 16-bit outputs for the stored values 0 to 255.
+fn voi_lut_file(entries: &[u16], extra: Vec<El>) -> Vec<u8> {
+    let drop = [t(0x28, 0x100), t(0x28, 0x101), t(0x28, 0x102), t(0x28, 0x103), t(0x28, 0x1050), t(0x28, 0x1051)];
+    let mut els: Vec<El> = header(&Slice::new(0, 0)).into_iter().filter(|e| !drop.contains(&e.tag)).collect();
+    els.extend([us(t(0x28, 0x100), &[8]), us(t(0x28, 0x101), &[8]), us(t(0x28, 0x102), &[7]), us(t(0x28, 0x103), &[0])]);
+    els.push(sq(
+        t(0x28, 0x3010),
+        vec![vec![us(t(0x28, 0x3002), &[entries.len() as u16, 0, 16]), El { tag: t(0x28, 0x3006), vr: *b"OW", v: V::U16(entries.to_vec()) }]],
+    ));
+    els.extend(extra);
+    let px: Vec<u8> = (0..ROWS * COLS).map(|i| (i * 7) as u8).collect();
+    els.push(El { tag: t(0x7FE0, 0x10), vr: *b"OW", v: V::Raw(px) });
+    file(Ts::ExplicitLe, &els)
+}
+
+/// A VOI LUT given instead of a window: a linear one over the whole output
+/// range is that window, exactly; another one is not applied, and a warning
+/// says that the window shown is not the file's. SIGMOID windows are shown
+/// linear, with a warning.
+#[test]
+fn voi_lut_is_applied_when_it_is_a_window() {
+    let dir = tmpdir("dicom-voi");
+    // The identity of DICOM's VOI LUT test file vlut_04: 0, 257, ... 65535.
+    let linear: Vec<u16> = (0..256u32).map(|i| (i * 257) as u16).collect();
+    let p = write(&dir, "linear.dcm", &voi_lut_file(&linear, vec![]));
+    let info = open(&p, false).unwrap().header_info();
+    assert_eq!(info["dicom"]["window"], json!([0.0, 255.0]), "{info}");
+    assert!(info["warnings"].as_array().unwrap().is_empty(), "{info}");
+    let mut session = Session::new(1 << 20);
+    assert_eq!(request(&mut session, json!({"op": "open", "path": p}))["ok"], true);
+    let r = request(&mut session, json!({"op": "load"}));
+    assert_eq!(r["display_window"]["source"], "file", "{r}");
+    assert_eq!((r["display_window"]["low"].clone(), r["display_window"]["high"].clone()), (json!(0.0), json!(255.0)), "{r}");
+    // A gamma curve: not a window.
+    let gamma: Vec<u16> = (0..256u32).map(|i| (65535.0 * (i as f64 / 255.0).powf(0.5)).round() as u16).collect();
+    let p = write(&dir, "gamma.dcm", &voi_lut_file(&gamma, vec![]));
+    let info = open(&p, false).unwrap().header_info();
+    assert_eq!(info["dicom"]["window"], Value::Null, "{info}");
+    let warnings = info["warnings"].to_string();
+    assert!(warnings.contains("VOI LUT"), "{warnings}");
+    // A window with the SIGMOID function.
+    let mut els = header(&Slice::new(0, 0));
+    els.push(s(t(0x28, 0x1056), b"CS", "SIGMOID"));
+    els.push(El { tag: t(0x7FE0, 0x10), vr: *b"OW", v: V::Raw(pixels_le(0, 0)) });
+    let p = write(&dir, "sigmoid.dcm", &file(Ts::ExplicitLe, &els));
+    let info = open(&p, false).unwrap().header_info();
+    assert!(info["dicom"]["window"].is_array(), "{info}");
+    assert!(info["warnings"].to_string().contains("SIGMOID"), "{info}");
+}
+
+/// A DICOMDIR's image that is a link to a file outside its folder is not
+/// listed.
+#[test]
+fn dicomdir_images_behind_links_stay_in_the_folder() {
+    let top = tmpdir("dicom-dicomdir-links");
+    let root = top.join("disc");
+    std::fs::create_dir_all(&root).unwrap();
+    for k in 0..2 {
+        write(&root, &format!("i{k}"), &slice_file(&Slice::new(k, 0), Ts::ExplicitLe));
+    }
+    write(&top, "elsewhere", &slice_file(&Slice::new(2, 0), Ts::ExplicitLe));
+    std::os::unix::fs::symlink(top.join("elsewhere"), root.join("i2")).unwrap();
+    std::os::unix::fs::symlink("i1", root.join("i1link")).unwrap();
+    let rec = |kind: &str, extra: Vec<El>| {
+        let mut r = vec![s(t(4, 0x1430), b"CS", kind)];
+        r.extend(extra);
+        r
+    };
+    let image = |path: &str| rec("IMAGE", vec![s(t(4, 0x1500), b"CS", path)]);
+    let records = vec![
+        rec("PATIENT", vec![]),
+        rec("STUDY", vec![ui(t(0x20, 0x0D), "1.2.3.4")]),
+        rec("SERIES", vec![ui(t(0x20, 0x0E), "1.2.3.4.5")]),
+        image("I0"),
+        image("I1LINK"),
+        image("I2"),
+    ];
+    let p = dicomdir(&root, records);
+    let mut s = Session::new(1 << 20);
+    assert_eq!(request(&mut s, json!({"op": "open", "path": p}))["ok"], true);
+    let l = request(&mut s, json!({"op": "series_list"}));
+    assert_eq!(l["series"][0]["images"], 2, "the link inside the folder only: {l}");
+}

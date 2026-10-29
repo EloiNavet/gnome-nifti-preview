@@ -75,7 +75,7 @@ impl Lut {
     }
 
     /// From a descriptor (entries, first value, bits per entry) and its data.
-    fn read(set: &DataSet, descriptor: tags::Tag, data: tags::Tag) -> Option<Lut> {
+    pub(crate) fn read(set: &DataSet, descriptor: tags::Tag, data: tags::Tag) -> Option<Lut> {
         let d = set.numbers(descriptor);
         if d.len() < 3 {
             return None;
@@ -415,7 +415,7 @@ pub fn interleave(s: Samples, n: usize) -> Samples {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Store {
     pub dtype: DType,
-    /// Rescale applied while storing (float32 output only).
+    /// Rescale applied while storing (float output only).
     pub rescale: Option<(f64, f64)>,
 }
 
@@ -561,7 +561,13 @@ fn write_value(st: Store, v: Num, out: &mut [u8]) {
             };
             out.copy_from_slice(&(x as f32).to_le_bytes());
         }
-        DType::F64 => out.copy_from_slice(&f().to_le_bytes()),
+        DType::F64 => {
+            let x = match st.rescale {
+                Some((slope, inter)) => f() * slope + inter,
+                None => f(),
+            };
+            out.copy_from_slice(&x.to_le_bytes());
+        }
         _ => {}
     }
 }
@@ -573,4 +579,48 @@ pub fn ybr_to_rgb(y: f64, cb: f64, cr: f64) -> [f64; 3] {
         y - 0.344136 * (cb - 128.0) - 0.714136 * (cr - 128.0),
         y + 1.772 * (cb - 128.0),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One row of `n` pixels, 10 bits stored in 16, MONOCHROME1, as in the
+    /// DICOM WG04 file RG3_JPLY (12-bit lossy JPEG).
+    fn ten_bits(n: usize) -> PixelDesc {
+        PixelDesc {
+            rows: 1,
+            cols: n,
+            frames: 1,
+            spp: 1,
+            bits_allocated: 16,
+            bits_stored: 10,
+            high_bit: 9,
+            signed: false,
+            planar: false,
+            photometric: Photometric::Monochrome1,
+            float: false,
+            palette: None,
+            modality_lut: None,
+        }
+    }
+
+    fn stored(d: &PixelDesc, samples: Samples) -> Vec<u16> {
+        let mut out = vec![0u8; d.pixels() * 2];
+        store(d, &Frame { samples, colour: Colour::Rgb }, Store { dtype: DType::U16, rescale: None }, &mut out).unwrap();
+        out.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect()
+    }
+
+    /// A lossy decoder overshoots the bits stored near the top of the range
+    /// (RG3_JPLY decodes to 1024 where the original holds 1020 to 1023):
+    /// saturated to 1023, never wrapped to 0 as a mask would (GDCM, read by
+    /// SimpleITK, shows those pixels at the other end of the scale).
+    #[test]
+    fn lossy_overshoot_saturates() {
+        let d = ten_bits(4);
+        assert_eq!(stored(&d, Samples::Clamped(vec![1024, 1023, 5, 4095])), [1023, 1023, 5, 1023]);
+        // Native samples are masked to the bits stored (the bits above can
+        // hold other data).
+        assert_eq!(stored(&d, Samples::Int(vec![1024 | 5, 7, 0, 0])), [5, 7, 0, 0]);
+    }
 }

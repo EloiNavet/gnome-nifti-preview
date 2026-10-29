@@ -171,8 +171,9 @@ pub fn is_dicomdir(p: &Parsed) -> bool {
 }
 
 /// A file named by a DICOMDIR: path components below the DICOMDIR's
-/// folder (never outside it), matched without regard to case as media
-/// written on another system often differ.
+/// folder (never outside it, also through a symbolic link), matched without
+/// regard to case as media written on another system often differ. Links
+/// are checked here, when the DICOMDIR is read.
 pub fn referenced_file(root: &Path, components: &[String]) -> Option<PathBuf> {
     let mut path = root.to_path_buf();
     if components.is_empty() {
@@ -192,7 +193,9 @@ pub fn referenced_file(root: &Path, components: &[String]) -> Option<PathBuf> {
         let found = std::fs::read_dir(&path).ok()?.flatten().find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(c))?;
         path = found.path();
     }
-    path.is_file().then_some(path)
+    let folder = if root.as_os_str().is_empty() { Path::new(".") } else { root };
+    let inside = std::fs::canonicalize(&path).ok()?.starts_with(std::fs::canonicalize(folder).ok()?);
+    (inside && path.is_file()).then_some(path)
 }
 
 /// The series a DICOMDIR lists (records patient → study → series → image).

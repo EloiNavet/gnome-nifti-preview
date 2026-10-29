@@ -110,8 +110,8 @@ pub struct App<'a> {
     fallback: Option<Box<Viewer>>,
     /// The header as the protocol sends it, of the image shown.
     header: Option<serde_json::Value>,
-    /// The panel's lines, for (generation, volume).
-    sections: Option<(u64, usize, Lines)>,
+    /// The panel's warnings and lines, for (generation, volume).
+    sections: Option<(u64, usize, Vec<String>, Lines)>,
     active: usize,
     single: Option<usize>,
     panel: bool,
@@ -803,10 +803,11 @@ impl<'a> App<'a> {
         let State::Ready(v) = &mut self.state else { return Ok(()) };
         let volume = v.vol.current_volume();
         let note = |e: gnome_nifti_preview::error::PreviewError| vec![(text::clean(&e.message), Style::default().dim())];
-        let fresh = self.sections.as_ref().is_some_and(|(g, k, _)| *g == self.generation && *k == volume);
+        let fresh = self.sections.as_ref().is_some_and(|(g, k, _, _)| *g == self.generation && *k == volume);
         if !fresh {
+            let warnings = v.warnings().unwrap_or_default();
             let lines = v.sections(self.o.patient).map(|x| draw::section_lines(&x)).unwrap_or_else(note);
-            self.sections = Some((self.generation, volume, lines));
+            self.sections = Some((self.generation, volume, warnings, lines));
         }
         // Labels: counted once per volume and display (not per cursor move).
         let stale = self.labels.as_ref().is_none_or(|(g, k, _)| *g != self.generation || *k != volume);
@@ -823,7 +824,9 @@ impl<'a> App<'a> {
         let State::Ready(v) = &mut self.state else { return Ok(()) };
         let mut y = 0;
         let w = r.w.saturating_sub(1);
-        for (l, st) in self.sections.iter().flat_map(|(_, _, lines)| lines) {
+        // The warnings first, as in the GNOME viewer, cut to the panel's width.
+        let warnings = self.sections.as_ref().map(|(_, _, x, _)| draw::warning_lines(x, w)).unwrap_or_default();
+        for (l, st) in warnings.iter().chain(self.sections.iter().flat_map(|(_, _, _, lines)| lines)) {
             if y >= r.h {
                 break;
             }

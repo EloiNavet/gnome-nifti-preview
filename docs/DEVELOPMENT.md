@@ -68,7 +68,7 @@ How the parts fit: [ARCHITECTURE.md](ARCHITECTURE.md). Backend protocol:
 cd backend
 cargo test --workspace && cargo test --workspace --release
 cargo clippy --workspace --all-targets -- -D warnings
-cargo deny check                                   # cargo install --locked cargo-deny
+cargo deny --workspace check                       # cargo install --locked cargo-deny
 python3 fuzz/make_seeds.py /tmp/corpus             # cargo install --locked cargo-fuzz
 cargo +nightly fuzz run open_load_render /tmp/corpus -- -max_total_time=600
 ```
@@ -88,3 +88,11 @@ provenance (`gh attestation verify`). The same release carries `nitty.tar.gz`,
 the terminal viewer built statically (musl) for each architecture
 (`tools/package.sh --terminal`), which `get.sh --terminal` downloads. The one-command install works once the
 repository is public and a release exists.
+
+The tag must name the version of the sources (`backend/Cargo.toml` and
+`backend/terminal/Cargo.toml`; `v0.3.0-rc1` is a pre-release of 0.3.0), or the
+release stops before publishing. Before tagging, run the same workflow by hand
+(Actions > Release > Run workflow, or `gh workflow run release.yml --ref main`):
+it builds and tests both programs for each architecture (aarch64 on a public
+repository only), assembles both archives and keeps them as the run's
+artifacts, without publishing anything.

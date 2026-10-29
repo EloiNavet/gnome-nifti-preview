@@ -561,3 +561,63 @@ fn bzip2_matches_the_reference_tool() {
         }
     }
 }
+
+fn mhd(data: &str) -> String {
+    format!("ObjectType = Image\nNDims = 3\nDimSize = 4 4 4\nElementType = MET_UCHAR\nElementDataFile = {data}\n")
+}
+fn mhd_zlib(data: &str) -> String {
+    format!("ObjectType = Image\nNDims = 3\nDimSize = 4 4 4\nElementType = MET_UCHAR\nCompressedData = True\nElementDataFile = {data}\n")
+}
+fn nhdr(data: &str) -> String {
+    format!("NRRD0004\ntype: uchar\ndimension: 3\nsizes: 4 4 4\nencoding: raw\ndata file: {data}\n")
+}
+fn nhdr_text(data: &str) -> String {
+    format!("NRRD0004\ntype: uchar\ndimension: 3\nsizes: 4 4 4\nencoding: ascii\ndata file: {data}\n")
+}
+fn mih(data: &str) -> String {
+    format!("mrtrix image\ndim: 4,4,4\nvox: 1,1,1\nlayout: +0,+1,+2\ndatatype: UInt8\nfile: {data} 0\nEND\n")
+}
+
+/// The data file a header names stays in the header's folder: a symbolic
+/// link to a file elsewhere, or through a folder linked to another place, is
+/// refused like an absolute path or `..`; a link that stays in the folder is
+/// followed.
+#[test]
+fn links_do_not_take_data_files_out_of_the_folder() {
+    use std::os::unix::fs::symlink;
+    let top = tmpdir("fmt-links");
+    let dir = top.join("image");
+    std::fs::create_dir_all(dir.join("real")).unwrap();
+    std::fs::create_dir_all(top.join("elsewhere")).unwrap();
+    let bytes: Vec<u8> = (0..64u8).collect();
+    let mut text = String::new();
+    for b in &bytes {
+        text.push_str(&b.to_string());
+        text.push('\n');
+    }
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut z, &bytes).unwrap();
+    let zlib = z.finish().unwrap();
+    for (name, content) in [("data.raw", &bytes), ("data.txt", &text.as_bytes().to_vec()), ("data.z", &zlib)] {
+        std::fs::write(top.join("elsewhere").join(name), content).unwrap();
+        std::fs::write(dir.join("real").join(name), content).unwrap();
+        symlink(top.join("elsewhere").join(name), dir.join(format!("out-{name}"))).unwrap();
+        symlink(format!("real/{name}"), dir.join(format!("in-{name}"))).unwrap();
+    }
+    symlink(top.join("elsewhere"), dir.join("away")).unwrap();
+    type Header = fn(&str) -> String;
+    let headers: [(&str, Header, &str); 5] =
+        [("mhd", mhd, "raw"), ("mhd", mhd_zlib, "z"), ("nhdr", nhdr, "raw"), ("nhdr", nhdr_text, "txt"), ("mih", mih, "raw")];
+    for (n, (ext, header, data)) in headers.into_iter().enumerate() {
+        for (target, expected) in [
+            (format!("real/data.{data}"), "ok"),
+            (format!("in-data.{data}"), "ok"),
+            (format!("out-data.{data}"), "unsupported_format"),
+            (format!("away/data.{data}"), "unsupported_format"),
+        ] {
+            let p = dir.join(format!("h{n}-{}.{ext}", target.replace('/', "_")));
+            std::fs::write(&p, header(&target)).unwrap();
+            assert_eq!(outcome(&p), expected, "{ext} {data} -> {target}");
+        }
+    }
+}

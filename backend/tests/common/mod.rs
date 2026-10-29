@@ -4,8 +4,9 @@
 
 #![allow(dead_code)]
 
+use std::ffi::OsStr;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -209,9 +210,14 @@ pub fn gz(bytes: &[u8]) -> Vec<u8> {
     e.finish().unwrap()
 }
 
-/// A fresh directory for one test (tests run in parallel).
-pub fn tmpdir(name: &str) -> PathBuf {
+/// A fresh directory for one test (tests run in parallel), removed when the
+/// returned guard is dropped, also when the test panics. Keep the guard alive
+/// for as long as the files are used: `tmpdir("x").join("a")` alone removes
+/// the directory at the end of the statement (use [`TestDir::file`]).
+pub fn tmpdir(name: &str) -> TestDir {
     static N: AtomicUsize = AtomicUsize::new(0);
+    static SWEPT: std::sync::Once = std::sync::Once::new();
+    SWEPT.call_once(remove_stale_dirs);
     let d = std::env::temp_dir().join(format!(
         "np-test-{}-{name}-{}",
         std::process::id(),
@@ -219,7 +225,86 @@ pub fn tmpdir(name: &str) -> PathBuf {
     ));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
-    d
+    TestDir(d)
+}
+
+/// The directories left by earlier test processes that ended without
+/// dropping their guards (killed, or a deadline hit while a helper thread
+/// still held one): `np-test-PID-*` of this user whose process is gone.
+fn remove_stale_dirs() {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(me) = std::fs::metadata("/proc/self").map(|m| m.uid()) else { return };
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else { return };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let Some(rest) = name.to_str().and_then(|n| n.strip_prefix("np-test-")) else { continue };
+        let Some(pid) = rest.split('-').next().and_then(|p| p.parse::<u32>().ok()) else { continue };
+        let owned = e.metadata().is_ok_and(|m| m.is_dir() && m.uid() == me);
+        if owned && pid != std::process::id() && !Path::new(&format!("/proc/{pid}")).exists() {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
+/// A test's temporary directory, removed on drop.
+pub struct TestDir(PathBuf);
+
+impl TestDir {
+    /// The path of `name` in this directory, which lives as long as it.
+    pub fn file(self, name: &str) -> TestFile {
+        let path = self.0.join(name);
+        TestFile { path, _dir: self }
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+impl std::ops::Deref for TestDir {
+    type Target = PathBuf;
+    fn deref(&self) -> &PathBuf {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for TestDir {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<OsStr> for TestDir {
+    fn as_ref(&self) -> &OsStr {
+        self.0.as_os_str()
+    }
+}
+
+/// A file in its own temporary directory, removed with it.
+pub struct TestFile {
+    path: PathBuf,
+    _dir: TestDir,
+}
+
+impl std::ops::Deref for TestFile {
+    type Target = PathBuf;
+    fn deref(&self) -> &PathBuf {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for TestFile {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<OsStr> for TestFile {
+    fn as_ref(&self) -> &OsStr {
+        self.path.as_os_str()
+    }
 }
 
 /// Run `f` on a helper thread; fail (instead of hanging) after `secs`.

@@ -10,6 +10,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::Path;
 
@@ -333,6 +334,25 @@ pub fn open_data_file(path: &Path) -> Result<File> {
         bail!("not_a_file", "Data file {} is not a regular file", path.display());
     }
     Ok(file)
+}
+
+/// Open a data file named by a header, as [`open_data_file`], and only if
+/// the file opened lies in `root` (the header's folder): a symbolic link to
+/// a file elsewhere, or through a folder linked to another place, is
+/// refused. The check is made on the file actually opened (`/proc/self/fd`),
+/// so a link replaced in between changes nothing; without `/proc`, on the
+/// path resolved just before.
+pub fn open_data_file_in(path: &Path, root: Option<&Path>) -> Result<File> {
+    let file = open_data_file(path)?;
+    let Some(root) = root else { return Ok(file) };
+    let real = std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())).or_else(|_| std::fs::canonicalize(path));
+    match (real, std::fs::canonicalize(root)) {
+        (Ok(real), Ok(root)) if real.starts_with(&root) => Ok(file),
+        _ => Err(PreviewError::new(
+            "unsupported_format",
+            format!("Data file {} leads outside the header's folder (a symbolic link)", header::clean_text(&path.to_string_lossy())),
+        )),
+    }
 }
 
 pub fn too_large(what: &str, bytes: u64, max_bytes: u64) -> PreviewError {

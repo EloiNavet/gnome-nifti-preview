@@ -21,4 +21,6 @@ jobs:
         with:
           tool: cargo-deny
       - working-directory: backend
-        run: cargo deny check
+        run: cargo deny --workspace check
+      - working-directory: backend
+        run: cargo deny --manifest-path fuzz/Cargo.toml check advisories sources

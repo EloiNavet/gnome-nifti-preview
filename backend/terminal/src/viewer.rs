@@ -201,6 +201,17 @@ impl Viewer {
         Ok(panel::sections(&header, Some(stats), &d))
     }
 
+    /// What the GNOME viewer shows above its panel: the header's warnings
+    /// (orientation, obliquity, what assembling a DICOM image found...) and
+    /// the notes of the statistics (a truncated file, NaN voxels...).
+    pub fn warnings(&mut self) -> Result<Vec<String>> {
+        let header = self.vol.header_info();
+        let mut out: Vec<String> =
+            header["warnings"].as_array().into_iter().flatten().filter_map(|w| w.as_str().map(str::to_string)).collect();
+        out.extend(self.vol.stats()?.notes.iter().cloned());
+        Ok(out)
+    }
+
     /// The file name, cleaned for the terminal.
     pub fn name(&self) -> String {
         let n = self.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| self.path.display().to_string());

@@ -1,6 +1,6 @@
 # Compatibility
 
-Status as of version 0.2.0. "Tested" means a test was run on that
+Status as of version 0.2.1. "Tested" means a test was run on that
 configuration; the evidence column says which one. The automated GUI tests run
 the real, distribution-packaged GNOME Sushi under Xvfb (X11, no window manager)
 and talk to it over D-Bus exactly like Nautilus does; the real Nautilus 50 was
@@ -76,7 +76,7 @@ What nitty draws with is chosen from the terminal's answers to a few queries
 | Terminal | Drawn with | Status | Evidence |
 |---|---|---|---|
 | VTE 0.84 (GNOME Terminal 3.58, Ptyxis 50) | half blocks, 24-bit colour | **Tested by hand** | nitty run in a real VTE widget under Xvfb by a script outside the test suite, keys sent, screen read back and its screenshot checked by eye. This VTE answers DA1 without Sixel, and draws nothing when Sixel is forced |
-| tmux 3.6 | half blocks (tmux answers the queries itself) | **Tested by hand** | `tests/tmux.rs` run in an Ubuntu 26.04 container; the CI job runs it with Ubuntu 24.04's tmux (pending its first run) |
+| tmux 3.4 and 3.6 | half blocks (tmux answers the queries itself) | **Tested** | `tests/tmux.rs`: in CI with Ubuntu 24.04's tmux 3.4, required (`NITTY_REQUIRE_TMUX=1`; [CI run for 0.2.0](https://github.com/EloiNavet/gnome-nifti-preview/actions/runs/40670165665)), and by hand with tmux 3.6 in an Ubuntu 26.04 container |
 | A terminal answering like Kitty, like a Sixel terminal, or not at all | Kitty images, Sixel, half blocks | **Tested** (at the protocol level) | `tests/interactive.rs`: a pseudo-terminal plays the terminal |
 | Kitty, Ghostty, WezTerm, iTerm2, Konsole, foot, xterm with Sixel | images (Kitty, iTerm2 or Sixel) | **Expected to work, not tested** in those terminals | the sequences follow each protocol's specification and are checked byte for byte; the Sixel output, decoded by hand with libsixel's `sixel2png`, gives back the slices; Kitty and iTerm2 carry the library's PNG |
 | GNU screen 4.09 | half blocks, 256 colours | Expected to work, not tested | screen gets DA1 only (it would show the other queries) |
@@ -86,9 +86,9 @@ What nitty draws with is chosen from the terminal's answers to a few queries
 
 | Platform | Status | Evidence |
 |---|---|---|
-| Linux x86_64, static binary (musl) | **Tested by hand** | built in an Ubuntu 26.04 container, run in Ubuntu 22.04, 24.04, 26.04 and 26.10 containers; the CI job checks it for no dynamic loader or library (pending its first run) |
-| Linux aarch64, static binary | **Not built yet** | the release workflow builds it on GitHub's ARM runners when a tag is pushed (public repositories); it has never run |
-| Built from source, Rust 1.85 and stable | **Tested** | Clippy and the tests with both, with and without default features (the CI matrix: pending its first run); `install.sh --terminal` from a checkout |
+| Linux x86_64, static binary (musl) | **Tested** | CI builds it, checks that it has no dynamic loader or library and runs it in an Ubuntu 22.04 container ([CI run for 0.2.0](https://github.com/EloiNavet/gnome-nifti-preview/actions/runs/40670165665)); by hand, run in Ubuntu 22.04, 24.04, 26.04 and 26.10 containers |
+| Linux aarch64, static binary | **Built and started in CI** | the release workflow builds both programs on GitHub's ARM runner (Ubuntu 22.04), runs their tests there and starts the static nitty (`--version`) ([release run for 0.2.0](https://github.com/EloiNavet/gnome-nifti-preview/actions/runs/40672521544)); never run by hand, nor on another ARM machine |
+| Built from source, Rust 1.85 and stable | **Tested** | Clippy and the tests with both, with and without default features (the CI matrix; [CI run for 0.2.0](https://github.com/EloiNavet/gnome-nifti-preview/actions/runs/40670165665)); `install.sh --terminal` from a checkout |
 | macOS, BSD | Unsupported | the sandbox is Linux's (seccomp, Landlock), and the terminal layer was only built and run on Linux |
 
 ## Known limitations
@@ -107,6 +107,14 @@ What nitty draws with is chosen from the terminal's answers to a few queries
   from its button.
 * A qform quaternion with |b, c, d| > 1 is refused as an invalid file, as nibabel
   does.
+* DICOM volumes that are not only time points (several echoes, or another
+  dimension of an enhanced image) are shown one after the other without times,
+  with a warning; their time course mixes them. An echo cannot be chosen alone
+  yet.
+* A DICOM VOI LUT is applied when it is a straight line (exactly, as a window);
+  another curve is not, nor is a SIGMOID window function, which is shown
+  linear: a warning says so, and the window shown is then computed from the
+  image.
 * Spectra are a quick look, not a processing: no frequency alignment, no
   eddy-current correction, no first-order phase, no fitting. Edit conditions,
   ISIS steps, phase cycles, indirect and user dimensions are not decoded: the

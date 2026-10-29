@@ -13,6 +13,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use gnome_nifti_preview::error::PreviewError;
+use gnome_nifti_preview::header::{DType, Endian};
 use gnome_nifti_preview::orientation::VIEWS;
 use gnome_nifti_preview::render::render_slice;
 use gnome_nifti_preview::volume::{self, Volume};
@@ -155,6 +156,17 @@ fn cmd_dump(args: &Args) -> ExitCode {
             Ok(b) => bytes.extend_from_slice(&b),
             Err(e) => return fail(e),
         }
+    }
+    // The stored bytes follow the file's byte order: big-endian files are
+    // turned around, value by value (each part of a complex value).
+    if vol.header.endian == Endian::Big {
+        let part = match vol.header.dtype {
+            DType::C64 => 4,
+            DType::C128 => 8,
+            DType::Rgb24 | DType::Rgba32 => 1,
+            t => t.itemsize(),
+        };
+        bytes.chunks_exact_mut(part).for_each(<[u8]>::reverse);
     }
     if let Err(e) = std::fs::write(out, &bytes) {
         eprintln!("error: {out}: {e}");
